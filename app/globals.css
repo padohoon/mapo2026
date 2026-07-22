@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===== Apple-style reskin — Tailwind 뒤에서 톤만 덮어씀 (데이터 색상은 유지) ===== */
+:root{
+  --ap-blue:#0071e3; --ap-blue-h:#0077ed;
+  --ap-bg:#f5f5f7; --ap-ink:#1d1d1f; --ap-line:rgba(0,0,0,.08);
+}
+html{ -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale; }
+body, body *{
+  font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','SF Pro Display','Pretendard','Apple SD Gothic Neo','Malgun Gothic',sans-serif !important;
+}
+body{ background:var(--ap-bg); letter-spacing:-.012em; }
+h1,h2,h3{ letter-spacing:-.022em; }
+
+/* 애플식 타이포 위계 — 섹션 제목을 크고 굵게 */
+main h2{ font-size:1.6rem !important; font-weight:700 !important; letter-spacing:-.024em; }
+header h1{ font-size:1.2rem !important; font-weight:700 !important; letter-spacing:-.02em; }
+/* 페이지 전역 가로 거터를 2rem로 통일 → 헤더·본문·사이드바 좌우 정렬 일치 */
+header.sticky{ padding-left:2rem !important; padding-right:2rem !important; }
+aside.border-r{ padding-left:1.25rem !important; padding-right:1.25rem !important; }
+main{ padding:2rem 2rem !important; }
+
+/* 표면 */
+.bg-neutral-50{ background-color:var(--ap-bg) !important; }
+.bg-neutral-100{ background-color:#eeeef0 !important; }
+.text-neutral-900{ color:var(--ap-ink) !important; }
+
+/* 반투명 블러 헤더 */
+header.sticky{
+  background:rgba(255,255,255,.72) !important;
+  -webkit-backdrop-filter:saturate(180%) blur(20px); backdrop-filter:saturate(180%) blur(20px);
+  border-bottom:1px solid var(--ap-line) !important;
+}
+/* 사이드바 유리 질감 */
+aside.border-r{
+  background:rgba(255,255,255,.6) !important;
+  -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px);
+  border-right:1px solid var(--ap-line) !important;
+}
+
+/* 넉넉한 라운드 */
+.rounded{ border-radius:7px !important; }
+.rounded-lg{ border-radius:12px !important; }
+.rounded-xl{ border-radius:14px !important; }
+.rounded-2xl{ border-radius:22px !important; }
+
+/* 부드러운 경계선 */
+.border-neutral-100{ border-color:rgba(0,0,0,.05) !important; }
+.border-neutral-200{ border-color:var(--ap-line) !important; }
+.border-neutral-300{ border-color:rgba(0,0,0,.14) !important; }
+
+/* 브랜드·CTA·선택 상태 → 애플 블루 (데이터용 emerald 톤은 미변경) */
+.bg-emerald-700{ background-color:var(--ap-blue) !important; }
+.hover\:bg-emerald-800:hover{ background-color:var(--ap-blue-h) !important; }
+.text-emerald-700, .hover\:text-emerald-700:hover{ color:var(--ap-blue) !important; }
+.border-emerald-700{ border-color:var(--ap-blue) !important; }
+.hover\:bg-emerald-50:hover{ background-color:rgba(0,113,227,.08) !important; }
+.ring-emerald-500{ --tw-ring-color:var(--ap-blue) !important; }
+.border-emerald-500{ border-color:var(--ap-blue) !important; }
+
+/* 절제된 다크 버튼 */
+.bg-neutral-900{ background-color:var(--ap-ink) !important; }
+.border-neutral-900{ border-color:var(--ap-ink) !important; }
+
+/* 겹겹의 은은한 그림자 */
+.shadow-xl{ box-shadow:0 10px 30px rgba(0,0,0,.10),0 2px 8px rgba(0,0,0,.06) !important; }
+.shadow-2xl{ box-shadow:0 24px 64px rgba(0,0,0,.20),0 6px 16px rgba(0,0,0,.10) !important; }
+
+/* 버튼: 부드러운 전환 + 눌림감 */
+button{ transition:background-color .18s ease,color .18s ease,border-color .18s ease,box-shadow .18s ease,transform .1s ease,opacity .18s ease; }
+button:active{ transform:scale(.975); }
+
+/* 입력 필드: 애플 포커스 링 */
+input,select,textarea{ border-radius:10px !important; }
+input:focus,select:focus,textarea:focus{
+  outline:none; border-color:var(--ap-blue) !important;
+  box-shadow:0 0 0 3px rgba(0,113,227,.25) !important;
+}
+
+/* 모달 배경 블러 */
+.bg-black.bg-opacity-40{
+  background-color:rgba(0,0,0,.32) !important;
+  -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
+}
+
+/* 가는 스크롤바 */
+::-webkit-scrollbar{ width:10px; height:10px; }
+::-webkit-scrollbar-thumb{ background:rgba(0,0,0,.18); border-radius:8px; border:2px solid transparent; background-clip:padding-box; }
+::-webkit-scrollbar-thumb:hover{ background:rgba(0,0,0,.3); border:2px solid transparent; background-clip:padding-box; }
