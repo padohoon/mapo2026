@@ -230,6 +230,7 @@ function App({ initialData, configured, emit, reload }) {
   const [viewMode, setViewMode] = useState("month"); // month | byCustomer
   const [managerFilter, setManagerFilter] = useState("전체");
   const [customerFilter, setCustomerFilter] = useState("전체");
+  const [byCustSel, setByCustSel] = useState([]); // 고객사별 페이지에서 선택한 고객사(빈 배열=전체)
   const [overrides, setOverrides] = useState(initialData.overrides);
   const [selected, setSelected] = useState(null);
   const [dayOpen, setDayOpen] = useState(null); // 날짜 상세 목록
@@ -634,6 +635,24 @@ function App({ initialData, configured, emit, reload }) {
     length: 7
   }, (_, i) => addDays(weekStart, i));
   const visibleCustomers = customers.filter(c => (managerFilter === "전체" || c.manager === managerFilter) && (customerFilter === "전체" || c.id === customerFilter));
+  // 고객사별 페이지: 체크박스로 선택한 고객사(비어있으면 전체) + 담당자 필터
+  const pageCustomers = customers.filter(c => (byCustSel.length === 0 || byCustSel.includes(c.id)) && (managerFilter === "전체" || c.manager === managerFilter));
+  const pageCustIds = new Set(pageCustomers.map(c => c.id));
+  const byCustDateMap = new Map();
+  finalTasks.forEach(t => {
+    if (!pageCustIds.has(t.customer.id)) return;
+    if (!byCustDateMap.has(t.date)) byCustDateMap.set(t.date, []);
+    byCustDateMap.get(t.date).push(t);
+  });
+  byCustDateMap.forEach(arr => arr.sort((a, b) => {
+    if (!!a.done !== !!b.done) return a.done ? 1 : -1;
+    const ao = taskOrder[a.id], bo = taskOrder[b.id];
+    if (ao != null && bo != null) return ao - bo;
+    if (ao != null) return -1;
+    if (bo != null) return 1;
+    const rank = x => x.isReport ? 0 : x.personal ? 2 : 1;
+    return rank(a) - rank(b) || a.customer.name.localeCompare(b.customer.name);
+  }));
   const toggleDone = (t, val) => setOverrides(o => ({
     ...o,
     [t.id]: {
@@ -955,7 +974,21 @@ function App({ initialData, configured, emit, reload }) {
     className: "text-xs px-2 py-1 rounded-lg border border-neutral-300 hover:bg-neutral-100"
   }, "이번 주")), /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-neutral-500"
-  }, "행 = 고객사 · 열 = 요일 · 체크로 완료 · 드래그로 날짜 이동")), /*#__PURE__*/React.createElement("table", {
+  }, "행 = 고객사 · 열 = 요일 · 체크로 완료 · 드래그로 날짜 이동")), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-wrap items-center gap-2 mb-3"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-xs font-semibold text-neutral-500"
+  }, "고객사 선택:"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setByCustSel([]),
+    className: `text-xs px-2 py-1 rounded-full border ${byCustSel.length === 0 ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300 hover:bg-neutral-100"}`
+  }, "전체"), customers.map((c, i) => {
+    const on = byCustSel.includes(c.id);
+    return /*#__PURE__*/React.createElement("button", {
+      key: c.id,
+      onClick: () => setByCustSel(sel => on ? sel.filter(x => x !== c.id) : [...sel, c.id]),
+      className: `text-xs px-2 py-1 rounded-full border flex items-center gap-1 ${on ? `${CUST_ROW[i % CUST_ROW.length].tag} border-transparent ring-2 ring-neutral-400` : "border-neutral-300 text-neutral-600 hover:bg-neutral-100"}`
+    }, /*#__PURE__*/React.createElement("span", null, on ? "☑" : "☐"), c.name);
+  })), /*#__PURE__*/React.createElement("table", {
     className: "w-full border-collapse bg-white rounded-2xl overflow-hidden border border-neutral-200 shadow-xl text-xs"
   }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", {
     className: "bg-neutral-50 text-neutral-500 text-left px-3 py-3 w-32 font-semibold"
@@ -969,7 +1002,7 @@ function App({ initialData, configured, emit, reload }) {
       className: `px-2 py-2 text-center font-semibold
                           ${today ? "bg-rose-500 text-white" : past ? "bg-neutral-100 text-neutral-400" : "bg-neutral-50 " + (d.getDay() === 0 ? "text-rose-500" : d.getDay() === 6 ? "text-sky-500" : "text-neutral-500")}`
     }, d.getMonth() + 1, "/", d.getDate(), " (", WEEKDAYS[d.getDay()], ")", today ? " 오늘" : "", hol ? ` ${hol}` : "");
-  }))), /*#__PURE__*/React.createElement("tbody", null, visibleCustomers.map(c => {
+  }))), /*#__PURE__*/React.createElement("tbody", null, pageCustomers.map(c => {
     const idx = customers.findIndex(x => x.id === c.id);
     const pal = CUST_ROW[idx % CUST_ROW.length];
     return /*#__PURE__*/React.createElement("tr", {
@@ -983,7 +1016,7 @@ function App({ initialData, configured, emit, reload }) {
       const ds = fmt(d);
       const past = ds < TODAY,
         today = ds === TODAY;
-      const cellTasks = (byDate.get(ds) || []).filter(t => t.customer.id === c.id);
+      const cellTasks = (byCustDateMap.get(ds) || []).filter(t => t.customer.id === c.id);
       const onLeave = isOnLeave(c.manager, ds);
       return /*#__PURE__*/React.createElement("td", {
         key: ds,
@@ -1008,6 +1041,47 @@ function App({ initialData, configured, emit, reload }) {
         className: "w-full mt-px text-xs text-neutral-400 hover:text-emerald-700 rounded px-1 text-left opacity-0 group-hover:opacity-100 transition-opacity"
       }, "+ 업무"));
     }));
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "mt-6"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-3 mb-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => moveMonth(-1),
+    className: "w-8 h-8 rounded-lg border border-neutral-300 hover:bg-neutral-100"
+  }, "←"), /*#__PURE__*/React.createElement("h2", {
+    className: "text-xl font-bold"
+  }, y, "년 ", m + 1, "월"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => moveMonth(1),
+    className: "w-8 h-8 rounded-lg border border-neutral-300 hover:bg-neutral-100"
+  }, "→"), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-neutral-500"
+  }, "선택 고객사 월간 (", pageCustomers.length, "곳)")), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-7 gap-px bg-neutral-100 rounded-2xl overflow-hidden border border-neutral-200 shadow-xl"
+  }, WEEKDAYS.map((w, i) => /*#__PURE__*/React.createElement("div", {
+    key: "wd" + w,
+    className: `bg-white text-center text-xs font-semibold py-2 ${i === 0 ? "text-rose-500" : i === 6 ? "text-sky-500" : "text-neutral-400"}`
+  }, w)), cells.map((d, i) => {
+    if (!d) return /*#__PURE__*/React.createElement("div", {
+      key: "pad" + i,
+      className: "bg-neutral-50 min-h-24"
+    });
+    const ds = fmt(d);
+    const today = ds === TODAY,
+      past = ds < TODAY;
+    const dayTasks = byCustDateMap.get(ds) || [];
+    return /*#__PURE__*/React.createElement("div", {
+      key: ds,
+      ...dropHandlers(ds),
+      className: `min-h-24 p-1 transition-colors ${dragOver === ds ? "bg-emerald-50 ring-2 ring-inset ring-emerald-500" : today ? "bg-white ring-2 ring-inset ring-rose-400" : past ? "bg-neutral-100" : "bg-white"}`
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => setDayOpen(ds),
+      className: `text-xs font-semibold px-1 hover:underline ${today ? "text-rose-500" : past ? "text-neutral-400" : "text-neutral-700"}`
+    }, d.getDate()), /*#__PURE__*/React.createElement("div", {
+      className: "mt-1 space-y-px"
+    }, dayTasks.map(t => /*#__PURE__*/React.createElement(Chip, {
+      key: t.id,
+      t: t
+    }))));
   })))) :
   /*#__PURE__*/
   /* ===== 업무 설정 탭 (고객사 × 상품) ===== */
