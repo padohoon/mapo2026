@@ -1676,6 +1676,8 @@ function ManagersPanel({
     value: name,
     onChange: e => setName(e.target.value),
     onKeyDown: e => {
+      // 한글 조합 중(IME)일 때의 Enter 는 무시 → 중복 추가 방지
+      if (e.nativeEvent.isComposing || e.keyCode === 229) return;
       if (e.key === "Enter") add();
     },
     placeholder: "새 담당자 이름",
