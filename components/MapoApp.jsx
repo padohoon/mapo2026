@@ -146,8 +146,76 @@ const mondayOf = d => {
   return addDays(r, -dow);
 };
 
+// ---------- 행 단위 diff (동시 편집 안전 저장용) ----------
+// 이전 동기화본(prev)과 현재 상태(cur)를 비교해 바뀐 행만 ops 로 만든다.
+const customerRow = c => ({ id: c.id, name: c.name, manager: c.manager, reg_date: c.regDate, weekly_report_day: c.weeklyReportDay, monthly_report_date: c.monthlyReportDate, products: c.products || [], mr_overrides: c.mrOverrides || {} });
+const personalRow = pt => ({ id: pt.id, date: pt.date, title: pt.title, manager: pt.manager, customer_id: pt.customerId ?? null, customer_name: pt.customerName ?? null, done: !!pt.done });
+function diffArrById(ops, table, prevArr, curArr, pk, toRow) {
+  const pm = new Map((prevArr || []).map(x => [x[pk], x]));
+  const cm = new Map((curArr || []).map(x => [x[pk], x]));
+  cm.forEach((x, id) => {
+    const p = pm.get(id);
+    if (!p || JSON.stringify(x) !== JSON.stringify(p)) ops.push({ table, op: "upsert", row: toRow(x) });
+  });
+  pm.forEach((_, id) => { if (!cm.has(id)) ops.push({ table, op: "delete", match: { [pk]: id } }); });
+}
+function diffMap(ops, table, pk, prev, cur, toRow, keepFn) {
+  prev = prev || {};
+  cur = cur || {};
+  const keys = new Set([...Object.keys(prev), ...Object.keys(cur)]);
+  keys.forEach(k => {
+    const pv = prev[k], cv = cur[k];
+    const keep = cv !== undefined && (keepFn ? keepFn(cv) : true);
+    if (!keep) {
+      if (pv !== undefined) ops.push({ table, op: "delete", match: { [pk]: k } });
+      return;
+    }
+    if (pv === undefined || JSON.stringify(pv) !== JSON.stringify(cv)) ops.push({ table, op: "upsert", row: toRow(k, cv) });
+  });
+}
+function computeOps(prev, cur) {
+  const ops = [];
+  diffArrById(ops, "customers", prev.customers, cur.customers, "id", customerRow);
+  diffArrById(ops, "personal_tasks", prev.personalTasks, cur.personalTasks, "id", personalRow);
+  // holidays: [date,name] 튜플 배열
+  {
+    const pm = new Map((prev.holidays || []).map(t => [t[0], t[1]]));
+    const cm = new Map((cur.holidays || []).map(t => [t[0], t[1]]));
+    cm.forEach((name, date) => { if (pm.get(date) !== name) ops.push({ table: "holidays", op: "upsert", row: { date, name } }); });
+    pm.forEach((_, date) => { if (!cm.has(date)) ops.push({ table: "holidays", op: "delete", match: { date } }); });
+  }
+  // leaves: 자연키 manager|date (추가/삭제만)
+  {
+    const key = l => `${l.manager}|${l.date}`;
+    const ps = new Map((prev.leaves || []).map(l => [key(l), l]));
+    const cs = new Map((cur.leaves || []).map(l => [key(l), l]));
+    cs.forEach((l, k) => { if (!ps.has(k)) ops.push({ table: "leaves", op: "insert", row: { manager: l.manager, date: l.date } }); });
+    ps.forEach((l, k) => { if (!cs.has(k)) ops.push({ table: "leaves", op: "delete", match: { manager: l.manager, date: l.date } }); });
+  }
+  // managers: 이름 키 + 표시순서(ord)
+  {
+    const pm = new Map((prev.managers || []).map((m, i) => [m.name, { color: m.color, ord: i }]));
+    const cm = new Map((cur.managers || []).map((m, i) => [m.name, { color: m.color, ord: i }]));
+    cm.forEach((m, name) => { const p = pm.get(name); if (!p || p.color !== m.color || p.ord !== m.ord) ops.push({ table: "managers", op: "upsert", row: { name, color: m.color, ord: m.ord } }); });
+    pm.forEach((_, name) => { if (!cm.has(name)) ops.push({ table: "managers", op: "delete", match: { name } }); });
+  }
+  diffMap(ops, "task_overrides", "task_id", prev.overrides, cur.overrides,
+    (k, v) => ({ task_id: k, date: v.date ?? null, done: v.done ?? null }),
+    v => v && (v.date != null || v.done != null));
+  diffMap(ops, "step_overrides", "key", prev.managerSteps, cur.managerSteps,
+    (k, v) => ({ key: k, mode: v.mode, arg: v.arg ?? null }));
+  diffMap(ops, "step_disabled", "key", prev.stepDisabled, cur.stepDisabled,
+    k => ({ key: k }), v => !!v);
+  diffMap(ops, "step_extras", "key", prev.stepExtras, cur.stepExtras,
+    (k, v) => ({ key: k, steps: v }), v => Array.isArray(v) && v.length > 0);
+  diffMap(ops, "task_order", "task_id", prev.taskOrder, cur.taskOrder,
+    (k, v) => ({ task_id: k, ord: v }));
+  return ops;
+}
+const DEFAULT_MANAGER_OPS = () => DEFAULT_MANAGERS.map((m, i) => ({ table: "managers", op: "upsert", row: { name: m.name, color: m.color, ord: i } }));
+
 // ---------- 메인 앱 ----------
-function App({ initialData, onPersist }) {
+function App({ initialData, configured, emit, reload }) {
   const [customers, setCustomers] = useState(initialData.customers);
   const [leaves, setLeaves] = useState(initialData.leaves);
   const [holidays, setHolidays] = useState(initialData.holidays);
@@ -185,34 +253,40 @@ function App({ initialData, onPersist }) {
   const managerNames = managers.map((m) => m.name);
   const colorOf = (name) => (managers.find((m) => m.name === name) || {}).color || "bg-slate-500";
 
-  // ── DB 자동저장: 상태가 바뀌면 디바운스 후 전체 문서를 서버에 스냅샷 저장 ──
-  const _firstSave = React.useRef(true);
-  const _pending = React.useRef(null); // 아직 저장 안 된 최신 문서
+  // ── DB 동기화: 행 단위 부분 저장(동시 편집 안전) + 폴링으로 타인 변경 반영 ──
   const [saving, setSaving] = useState(false);
+  const _synced = React.useRef(initialData); // 마지막으로 서버와 맞춘 문서
+  const _lastEdit = React.useRef(0); // 마지막 로컬 편집 시각
+  const _docRef = React.useRef(initialData); // 최신 상태 스냅샷(폴링에서 참조)
+  const curDoc = { customers, leaves, holidays, overrides, managerSteps, personalTasks, managers, stepDisabled, stepExtras, taskOrder };
+  _docRef.current = curDoc;
+
+  // 변경분(diff)을 디바운스 후 전송 — 바뀐 행만 보내므로 동시 편집 충돌 없음
   React.useEffect(() => {
-    if (_firstSave.current) {
-      _firstSave.current = false;
-      return;
-    }
-    if (!onPersist) return; // Supabase 미설정 시 인메모리로만 동작
-    const doc = { customers, leaves, holidays, overrides, managerSteps, personalTasks, managers, stepDisabled, stepExtras, taskOrder };
-    _pending.current = doc;
+    if (!configured) return;
+    const ops = computeOps(_synced.current, curDoc);
+    if (ops.length === 0) return;
+    _lastEdit.current = Date.now();
     const h = setTimeout(async () => {
-      const d = _pending.current;
-      if (!d) return;
-      _pending.current = null;
+      const latest = _docRef.current;
+      const send = computeOps(_synced.current, latest);
+      if (send.length === 0) return;
       setSaving(true);
-      await onPersist(d);
+      await emit(send);
+      _synced.current = latest;
       setSaving(false);
     }, 500);
     return () => clearTimeout(h);
-  }, [customers, leaves, holidays, overrides, managerSteps, personalTasks, managers, stepDisabled, stepExtras, taskOrder, onPersist]);
-  // 새로고침/이탈 시 아직 저장 안 된 변경을 즉시 전송(keepalive) → 빨리 새로고침해도 유실 방지
+  }, [customers, leaves, holidays, overrides, managerSteps, personalTasks, managers, stepDisabled, stepExtras, taskOrder, configured, emit]);
+
+  // 이탈/새로고침 시 미전송 변경을 즉시 전송(keepalive)
   React.useEffect(() => {
+    if (!configured) return;
     const flush = () => {
-      if (_pending.current && onPersist) {
-        onPersist(_pending.current, true);
-        _pending.current = null;
+      const send = computeOps(_synced.current, _docRef.current);
+      if (send.length) {
+        emit(send, true);
+        _synced.current = _docRef.current;
       }
     };
     window.addEventListener("beforeunload", flush);
@@ -221,7 +295,41 @@ function App({ initialData, onPersist }) {
       window.removeEventListener("beforeunload", flush);
       window.removeEventListener("pagehide", flush);
     };
-  }, [onPersist]);
+  }, [configured, emit]);
+
+  // 폴링: 4초마다 서버 최신본을 받아 타인 변경을 반영 (로컬 편집 중/미전송 중이면 스킵)
+  React.useEffect(() => {
+    if (!configured || !reload) return;
+    let alive = true;
+    const applyDoc = doc => {
+      setCustomers(doc.customers);
+      setLeaves(doc.leaves);
+      setHolidays(doc.holidays);
+      setOverrides(doc.overrides);
+      setManagerSteps(doc.managerSteps);
+      setPersonalTasks(doc.personalTasks);
+      setManagers(doc.managers);
+      setStepDisabled(doc.stepDisabled);
+      setStepExtras(doc.stepExtras);
+      setTaskOrder(doc.taskOrder);
+      _synced.current = doc;
+      _docRef.current = doc;
+    };
+    const iv = setInterval(async () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      if (Date.now() - _lastEdit.current < 3000) return; // 최근 편집 중이면 스킵
+      if (computeOps(_synced.current, _docRef.current).length > 0) return; // 미전송 변경 있음
+      const doc = await reload();
+      if (!alive || !doc) return;
+      if (Date.now() - _lastEdit.current < 3000) return; // 재확인
+      if (computeOps(_synced.current, _docRef.current).length > 0) return;
+      if (JSON.stringify(doc) !== JSON.stringify(_synced.current)) applyDoc(doc);
+    }, 4000);
+    return () => {
+      alive = false;
+      clearInterval(iv);
+    };
+  }, [configured, reload]);
 
   const holidayMap = useMemo(() => {
     const m = new Map();
@@ -1817,6 +1925,16 @@ const pickDoc = res => ({
   stepExtras: res.stepExtras || {},
   taskOrder: res.taskOrder || {}
 });
+// 행 단위 변경 전송
+function sendOps(ops, keepalive) {
+  if (!ops || ops.length === 0) return Promise.resolve();
+  return fetch("/api/mutate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ops }),
+    keepalive: !!keepalive
+  }).catch(() => {});
+}
 function MapoApp() {
   const [state, setState] = useState({ status: "loading", data: null, configured: false });
   React.useEffect(() => {
@@ -1834,6 +1952,9 @@ function MapoApp() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(SEED_DOC)
           }).catch(() => {});
+        } else if (!res.managers || res.managers.length === 0) {
+          // 기존 DB(마이그레이션 후)에 담당자 행이 없으면 기본 담당자를 1회 시드
+          sendOps(DEFAULT_MANAGER_OPS());
         }
       } else {
         setState({ status: "ready", data: SEED_DOC, configured: false });
@@ -1843,13 +1964,13 @@ function MapoApp() {
     });
     return () => { alive = false; };
   }, []);
-  const save = React.useCallback((doc, keepalive) => {
-    return fetch("/api/data", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(doc),
-      keepalive: !!keepalive
-    }).catch(() => {});
+  const emit = React.useCallback((ops, keepalive) => sendOps(ops, keepalive), []);
+  const reload = React.useCallback(async () => {
+    try {
+      const res = await fetch("/api/data").then(r => r.json());
+      if (res && res.configured && !res.error) return pickDoc(res);
+    } catch (e) {}
+    return null;
   }, []);
   if (state.status === "loading") {
     return /*#__PURE__*/React.createElement("div", {
@@ -1858,7 +1979,9 @@ function MapoApp() {
   }
   return /*#__PURE__*/React.createElement(App, {
     initialData: state.data,
-    onPersist: state.configured ? save : null
+    configured: state.configured,
+    emit: emit,
+    reload: reload
   });
 }
 
