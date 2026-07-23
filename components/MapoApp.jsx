@@ -864,8 +864,13 @@ function App({ initialData, configured, emit, reload }) {
     title: "고객사 삭제",
     className: "text-neutral-400 hover:text-rose-600 text-sm leading-none px-1"
   }, "✕"))), /*#__PURE__*/React.createElement("p", {
-    className: "text-xs text-neutral-500 mt-1"
-  }, "등록 ", c.regDate, " · 주리포트 ", WEEKDAYS[c.weeklyReportDay], "요일"), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-neutral-500 mt-1 flex items-center gap-1 flex-wrap"
+  }, /*#__PURE__*/React.createElement("span", null, "시작일"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: c.regDate,
+    onChange: e => setCustomers(cs => cs.map(x => x.id === c.id ? { ...x, regDate: e.target.value } : x)),
+    className: "border border-neutral-300 rounded px-1 py-px text-xs bg-white"
+  }), /*#__PURE__*/React.createElement("span", null, "· 주리포트 ", WEEKDAYS[c.weeklyReportDay], "요일")), /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-1 mt-1"
   }, /*#__PURE__*/React.createElement("span", {
     className: "text-xs text-neutral-600 font-semibold"
