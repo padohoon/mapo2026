@@ -185,6 +185,8 @@ function App({ initialData, onPersist }) {
 
   // ── DB 자동저장: 상태가 바뀌면 디바운스 후 전체 문서를 서버에 스냅샷 저장 ──
   const _firstSave = React.useRef(true);
+  const _pending = React.useRef(null); // 아직 저장 안 된 최신 문서
+  const [saving, setSaving] = useState(false);
   React.useEffect(() => {
     if (_firstSave.current) {
       _firstSave.current = false;
@@ -192,9 +194,32 @@ function App({ initialData, onPersist }) {
     }
     if (!onPersist) return; // Supabase 미설정 시 인메모리로만 동작
     const doc = { customers, leaves, holidays, overrides, managerSteps, personalTasks, managers, stepDisabled, stepExtras, taskOrder };
-    const h = setTimeout(() => onPersist(doc), 700);
+    _pending.current = doc;
+    const h = setTimeout(async () => {
+      const d = _pending.current;
+      if (!d) return;
+      _pending.current = null;
+      setSaving(true);
+      await onPersist(d);
+      setSaving(false);
+    }, 500);
     return () => clearTimeout(h);
   }, [customers, leaves, holidays, overrides, managerSteps, personalTasks, managers, stepDisabled, stepExtras, taskOrder, onPersist]);
+  // 새로고침/이탈 시 아직 저장 안 된 변경을 즉시 전송(keepalive) → 빨리 새로고침해도 유실 방지
+  React.useEffect(() => {
+    const flush = () => {
+      if (_pending.current && onPersist) {
+        onPersist(_pending.current, true);
+        _pending.current = null;
+      }
+    };
+    window.addEventListener("beforeunload", flush);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      window.removeEventListener("pagehide", flush);
+    };
+  }, [onPersist]);
 
   const holidayMap = useMemo(() => {
     const m = new Map();
@@ -612,7 +637,9 @@ function App({ initialData, onPersist }) {
   }, "일정 관리"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setPanel("register"),
     className: "text-sm px-4 py-2 rounded-lg bg-emerald-700 text-white font-semibold hover:bg-emerald-800"
-  }, "+ 고객사 등록"), /*#__PURE__*/React.createElement("a", {
+  }, "+ 고객사 등록"), /*#__PURE__*/React.createElement("span", {
+    className: `text-xs self-center transition-opacity ${saving ? "text-emerald-600 opacity-100" : "text-neutral-300 opacity-100"}`
+  }, saving ? "저장 중…" : "저장됨"), /*#__PURE__*/React.createElement("a", {
     href: "/api/logout",
     className: "text-sm px-3 py-2 rounded-lg text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100"
   }, "로그아웃"))),/*#__PURE__*/React.createElement("div", {
@@ -1752,11 +1779,12 @@ function MapoApp() {
     });
     return () => { alive = false; };
   }, []);
-  const save = React.useCallback(doc => {
-    fetch("/api/data", {
+  const save = React.useCallback((doc, keepalive) => {
+    return fetch("/api/data", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(doc)
+      body: JSON.stringify(doc),
+      keepalive: !!keepalive
     }).catch(() => {});
   }, []);
   if (state.status === "loading") {
