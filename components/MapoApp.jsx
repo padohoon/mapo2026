@@ -1080,7 +1080,8 @@ function App({ initialData, configured, emit, reload }) {
       className: "mt-1 space-y-px"
     }, dayTasks.map(t => /*#__PURE__*/React.createElement(Chip, {
       key: t.id,
-      t: t
+      t: t,
+      compact: pageCustomers.length === 1
     }))));
   })))) :
   /*#__PURE__*/
