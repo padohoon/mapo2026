@@ -95,6 +95,9 @@ const MANAGER_COLORS = {
   리즈: "bg-fuchsia-500",
   벨: "bg-slate-500"
 };
+// 담당자 추가 시 배정할 색 팔레트
+const MANAGER_PALETTE = ["bg-rose-500", "bg-indigo-500", "bg-emerald-600", "bg-amber-500", "bg-cyan-600", "bg-fuchsia-500", "bg-slate-500", "bg-teal-500", "bg-orange-500", "bg-lime-600", "bg-sky-500", "bg-violet-500", "bg-pink-500"];
+const DEFAULT_MANAGERS = MANAGERS.map((n) => ({ name: n, color: MANAGER_COLORS[n] }));
 // 고객사 행 색 (고객사별 보기용)
 const CUST_ROW = [{
   row: "bg-orange-50",
@@ -172,6 +175,13 @@ function App({ initialData, onPersist }) {
   // 사용자가 직접 추가하는 개인 업무: { id, date, title, manager, done }
   const [personalTasks, setPersonalTasks] = useState(initialData.personalTasks);
   const [addTaskDate, setAddTaskDate] = useState(null); // 개인업무 추가 대상 날짜
+  const [managers, setManagers] = useState(initialData.managers); // [{name,color}]
+  const [stepDisabled, setStepDisabled] = useState(initialData.stepDisabled); // { "cid|pid|si": true }
+  const [stepExtras, setStepExtras] = useState(initialData.stepExtras); // { "cid|pid": [{name,mode,arg}] }
+  const [taskOrder, setTaskOrder] = useState(initialData.taskOrder); // { taskId: number }
+
+  const managerNames = managers.map((m) => m.name);
+  const colorOf = (name) => (managers.find((m) => m.name === name) || {}).color || "bg-slate-500";
 
   // ── DB 자동저장: 상태가 바뀌면 디바운스 후 전체 문서를 서버에 스냅샷 저장 ──
   const _firstSave = React.useRef(true);
@@ -181,10 +191,10 @@ function App({ initialData, onPersist }) {
       return;
     }
     if (!onPersist) return; // Supabase 미설정 시 인메모리로만 동작
-    const doc = { customers, leaves, holidays, overrides, managerSteps, personalTasks };
+    const doc = { customers, leaves, holidays, overrides, managerSteps, personalTasks, managers, stepDisabled, stepExtras, taskOrder };
     const h = setTimeout(() => onPersist(doc), 700);
     return () => clearTimeout(h);
-  }, [customers, leaves, holidays, overrides, managerSteps, personalTasks, onPersist]);
+  }, [customers, leaves, holidays, overrides, managerSteps, personalTasks, managers, stepDisabled, stepExtras, taskOrder, onPersist]);
 
   const holidayMap = useMemo(() => {
     const m = new Map();
@@ -327,7 +337,13 @@ function App({ initialData, onPersist }) {
         c.products.forEach(pid => {
           const prod = PRODUCTS.find(p => p.id === pid);
           if (!prod) return;
-          prod.steps.forEach((s0, si) => {
+          // 기본 스텝 + 고객사별 추가 업무(extras). extras 는 기본 스텝 뒤 인덱스로 이어붙임
+          const extras = stepExtras[`${c.id}|${pid}`] || [];
+          const baseLen = prod.steps.length;
+          const allSteps = extras.length ? [...prod.steps, ...extras] : prod.steps;
+          allSteps.forEach((s0, si) => {
+            // 고객사별로 제외한 기본 업무는 건너뜀
+            if (si < baseLen && stepDisabled[`${c.id}|${pid}|${si}`]) return;
             const push = (date, shifted, idSuffix, modeText) => out.push({
               id: `${c.id}|${pid}|${si}|${idSuffix}`,
               customer: c,
@@ -405,7 +421,7 @@ function App({ initialData, onPersist }) {
       });
     });
     return out;
-  }, [customers, viewYM, weekStart, holidayMap, leaveSet, managerSteps]);
+  }, [customers, viewYM, weekStart, holidayMap, leaveSet, managerSteps, stepDisabled, stepExtras]);
   const finalTasks = useMemo(() => {
     const auto = tasks.map(t => {
       const ov = overrides[t.id] || {};
@@ -449,12 +465,19 @@ function App({ initialData, onPersist }) {
       map.get(t.date).push(t);
     });
     map.forEach(arr => arr.sort((a, b) => {
-      // 리포트 먼저, 그다음 자동 업무, 개인 업무는 맨 뒤
+      // ① 완료(체크)된 업무는 그날 맨 아래로
+      if (!!a.done !== !!b.done) return a.done ? 1 : -1;
+      // ② 사용자가 지정한 당일 순서(taskOrder)가 있으면 그 순서
+      const ao = taskOrder[a.id], bo = taskOrder[b.id];
+      if (ao != null && bo != null) return ao - bo;
+      if (ao != null) return -1;
+      if (bo != null) return 1;
+      // ③ 기본: 리포트 먼저, 그다음 자동 업무, 개인 업무는 맨 뒤
       const rank = x => x.isReport ? 0 : x.personal ? 2 : 1;
       return rank(a) - rank(b) || a.customer.name.localeCompare(b.customer.name);
     }));
     return map;
-  }, [finalTasks, managerFilter, customerFilter]);
+  }, [finalTasks, managerFilter, customerFilter, taskOrder]);
   const {
     y,
     m
@@ -483,6 +506,21 @@ function App({ initialData, onPersist }) {
       done: val
     }
   }));
+  // 당일 업무 순서 이동 (dir: -1 위로 / +1 아래로). 그날 전체에 순번을 부여
+  const reorderDay = (ds, id, dir) => {
+    const arr = (byDate.get(ds) || []).slice();
+    const i = arr.findIndex(t => t.id === id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= arr.length) return;
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
+    setTaskOrder(o => {
+      const n = { ...o };
+      arr.forEach((t, k) => { n[t.id] = k; });
+      return n;
+    });
+  };
   const Chip = ({
     t,
     compact
@@ -563,6 +601,9 @@ function App({ initialData, onPersist }) {
     onClick: () => setPanel("leave"),
     className: "text-sm px-3 py-2 rounded-lg border border-neutral-300 hover:bg-neutral-100"
   }, "연차 관리"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPanel("managers"),
+    className: "text-sm px-3 py-2 rounded-lg border border-neutral-300 hover:bg-neutral-100"
+  }, "담당자"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setAddTaskDate(TODAY),
     className: "text-sm px-3 py-2 rounded-lg border border-emerald-700 text-emerald-700 font-semibold hover:bg-emerald-50"
   }, "+ 일정 추가"), /*#__PURE__*/React.createElement("button", {
@@ -582,7 +623,7 @@ function App({ initialData, onPersist }) {
     className: "text-xs font-semibold text-neutral-500 mb-2"
   }, "담당자 필터"), /*#__PURE__*/React.createElement("div", {
     className: "flex flex-wrap gap-1 mb-4"
-  }, ["전체", ...MANAGERS].map(mg => /*#__PURE__*/React.createElement("button", {
+  }, ["전체", ...managerNames].map(mg => /*#__PURE__*/React.createElement("button", {
     key: mg,
     onClick: () => setManagerFilter(mg),
     className: `text-xs px-2 py-1 rounded-full border ${managerFilter === mg ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300 hover:bg-neutral-100"}`
@@ -608,9 +649,21 @@ function App({ initialData, onPersist }) {
     className: "flex items-center justify-between"
   }, /*#__PURE__*/React.createElement("span", {
     className: "font-semibold text-sm"
-  }, c.name), /*#__PURE__*/React.createElement("span", {
-    className: `text-xs text-white px-2 py-px rounded-full ${MANAGER_COLORS[c.manager]}`
-  }, c.manager)), /*#__PURE__*/React.createElement("p", {
+  }, c.name), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-1"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: `text-xs text-white px-2 py-px rounded-full ${colorOf(c.manager)}`
+  }, c.manager), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (window.confirm(`'${c.name}' 고객사를 삭제할까요?\n이 고객사의 자동 배치 업무가 모두 사라집니다. (되돌릴 수 없음)`)) {
+        setCustomers(cs => cs.filter(x => x.id !== c.id));
+        if (customerFilter === c.id) setCustomerFilter("전체");
+        if (settingsCustomer === c.id) setSettingsCustomer(null);
+      }
+    },
+    title: "고객사 삭제",
+    className: "text-neutral-400 hover:text-rose-600 text-sm leading-none px-1"
+  }, "✕"))), /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-neutral-500 mt-1"
   }, "등록 ", c.regDate, " · 주리포트 ", WEEKDAYS[c.weeklyReportDay], "요일"), /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-1 mt-1"
@@ -707,8 +760,10 @@ function App({ initialData, onPersist }) {
                         ${dragOver === ds ? "bg-emerald-50 ring-2 ring-inset ring-emerald-500" : today ? "bg-white ring-2 ring-inset ring-rose-400" : past ? "bg-neutral-100" : weekend || hol ? "bg-neutral-50" : "bg-white"}`
     }, /*#__PURE__*/React.createElement("div", {
       className: "flex items-center justify-between px-1"
-    }, /*#__PURE__*/React.createElement("span", {
-      className: `text-xs font-semibold ${hol && !today && !past ? "text-rose-600" : dateNumCls(ds, d.getDay())}`
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => setDayOpen(ds),
+      title: "당일 업무 순서 변경 / 전체 보기",
+      className: `text-xs font-semibold cursor-pointer hover:underline ${hol && !today && !past ? "text-rose-600" : dateNumCls(ds, d.getDay())}`
     }, d.getDate(), /*#__PURE__*/React.createElement("span", {
       className: "font-normal ml-px opacity-70"
     }, "(", WEEKDAYS[d.getDay()], ")")), today && /*#__PURE__*/React.createElement("span", {
@@ -845,7 +900,23 @@ function App({ initialData, onPersist }) {
       }, "✎ ", custCount, "개 조정")), /*#__PURE__*/React.createElement("p", {
         className: "text-xs text-neutral-500 mt-1"
       }, p.steps.length, "개 업무"));
-    })), /*#__PURE__*/React.createElement("div", {
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "mt-3 pt-3 border-t border-neutral-200"
+    }, /*#__PURE__*/React.createElement("p", {
+      className: "text-xs font-semibold text-neutral-500 mb-1"
+    }, "상품 추가 / 삭제 (이 고객사)"), /*#__PURE__*/React.createElement("div", {
+      className: "flex flex-wrap gap-1"
+    }, PRODUCTS.map(pp => {
+      const on = c.products.includes(pp.id);
+      return /*#__PURE__*/React.createElement("button", {
+        key: pp.id,
+        onClick: () => {
+          setCustomers(cs => cs.map(x => x.id === c.id ? { ...x, products: on ? x.products.filter(id => id !== pp.id) : [...x.products, pp.id] } : x));
+          if (on && settingsProd === pp.id) setSettingsProd(null);
+        },
+        className: `text-xs px-2 py-1 rounded-full border ${on ? "bg-emerald-700 text-white border-emerald-700" : "border-neutral-300 text-neutral-600 hover:bg-neutral-100"}`
+      }, on ? "✓ " : "＋ ", pp.name);
+    })))), /*#__PURE__*/React.createElement("div", {
       className: "col-span-8"
     }, !settingsProd || !prodIds.includes(settingsProd) ? /*#__PURE__*/React.createElement("div", {
       className: "border border-dashed border-neutral-300 rounded-xl p-8 text-center text-neutral-400 text-sm"
@@ -866,24 +937,69 @@ function App({ initialData, onPersist }) {
         className: "text-xs text-neutral-500 underline"
       }, "이 상품 전체 기본값으로")), /*#__PURE__*/React.createElement("div", {
         className: "space-y-2"
-      }, p.steps.map((s0, si) => s0.mode === "manual" ? /*#__PURE__*/React.createElement("div", {
-        key: si,
-        className: "border border-neutral-200 rounded-lg px-3 py-2 bg-neutral-50 text-sm text-neutral-500"
-      }, s0.name, " · 수동설정 (자동 배치 안 함)") : /*#__PURE__*/React.createElement(StepEditor, {
-        key: si,
-        ownerId: c.id,
-        pid: settingsProd,
-        si: si,
-        baseStep: s0,
-        override: managerSteps[`${c.id}|${settingsProd}|${si}`],
-        setStep: (key, val) => setManagerSteps(o => {
-          const n = {
-            ...o
-          };
-          if (val === null) delete n[key];else n[key] = val;
+      }, p.steps.map((s0, si) => {
+        const dkey = `${c.id}|${settingsProd}|${si}`;
+        const disabled = !!stepDisabled[dkey];
+        const toggleDisable = () => setStepDisabled(o => {
+          const n = { ...o };
+          if (disabled) delete n[dkey];else n[dkey] = true;
           return n;
+        });
+        if (disabled) return /*#__PURE__*/React.createElement("div", {
+          key: si,
+          className: "flex items-center justify-between border border-dashed border-neutral-300 rounded-lg px-3 py-2 text-sm text-neutral-400 bg-neutral-50"
+        }, /*#__PURE__*/React.createElement("span", {
+          className: "line-through"
+        }, s0.name, " · 제외됨"), /*#__PURE__*/React.createElement("button", {
+          onClick: toggleDisable,
+          className: "text-xs text-emerald-700 font-semibold shrink-0"
+        }, "다시 포함"));
+        if (s0.mode === "manual") return /*#__PURE__*/React.createElement("div", {
+          key: si,
+          className: "flex items-center justify-between border border-neutral-200 rounded-lg px-3 py-2 bg-neutral-50 text-sm text-neutral-500"
+        }, /*#__PURE__*/React.createElement("span", null, s0.name, " · 수동설정 (자동 배치 안 함)"), /*#__PURE__*/React.createElement("button", {
+          onClick: toggleDisable,
+          className: "text-xs text-neutral-400 hover:text-rose-600 shrink-0"
+        }, "제외"));
+        return /*#__PURE__*/React.createElement("div", {
+          key: si,
+          className: "flex items-start gap-2"
+        }, /*#__PURE__*/React.createElement("div", {
+          className: "flex-1"
+        }, /*#__PURE__*/React.createElement(StepEditor, {
+          ownerId: c.id,
+          pid: settingsProd,
+          si: si,
+          baseStep: s0,
+          override: managerSteps[dkey],
+          setStep: (key, val) => setManagerSteps(o => {
+            const n = { ...o };
+            if (val === null) delete n[key];else n[key] = val;
+            return n;
+          })
+        })), /*#__PURE__*/React.createElement("button", {
+          onClick: toggleDisable,
+          title: "이 업무 제외",
+          className: "text-xs text-neutral-300 hover:text-rose-600 mt-2 shrink-0"
+        }, "제외"));
+      }), (stepExtras[`${c.id}|${settingsProd}`] || []).map((es, ei) => /*#__PURE__*/React.createElement("div", {
+        key: "x" + ei,
+        className: "flex items-center justify-between border border-emerald-300 rounded-lg px-3 py-2 text-sm bg-emerald-50"
+      }, /*#__PURE__*/React.createElement("span", null, "＋ ", /*#__PURE__*/React.createElement("b", null, es.name), " · ", stepLabel(es), " (추가 업무)"), /*#__PURE__*/React.createElement("button", {
+        onClick: () => setStepExtras(o => {
+          const key = `${c.id}|${settingsProd}`;
+          const arr = (o[key] || []).filter((_, k) => k !== ei);
+          const n = { ...o };
+          if (arr.length) n[key] = arr;else delete n[key];
+          return n;
+        }),
+        className: "text-xs text-rose-500 hover:text-rose-700 shrink-0"
+      }, "삭제"))), /*#__PURE__*/React.createElement(AddStepRow, {
+        onAdd: step => setStepExtras(o => {
+          const key = `${c.id}|${settingsProd}`;
+          return { ...o, [key]: [...(o[key] || []), step] };
         })
-      }))), /*#__PURE__*/React.createElement("div", {
+      })), /*#__PURE__*/React.createElement("div", {
         className: "bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900 mt-3"
       }, "여기서 바꾼 설정은 ", /*#__PURE__*/React.createElement("b", null, c.name), "의 ", /*#__PURE__*/React.createElement("b", null, p.name), " 업무에만 적용됩니다. 같은 상품이라도 다른 고객사는 각자의 설정(또는 기본 템플릿)을 그대로 사용해요."));
     })()));
@@ -918,12 +1034,24 @@ function App({ initialData, onPersist }) {
   }), dayOpen && /*#__PURE__*/React.createElement(Overlay, {
     title: `${dayOpen} 전체 업무 (${(byDate.get(dayOpen) || []).length}건)`,
     onClose: () => setDayOpen(null)
-  }, /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-neutral-500 mb-2"
+  }, "▲▼ 로 당일 업무 순서를 바꿀 수 있어요. 완료(체크)한 업무는 자동으로 맨 아래로 내려갑니다."), /*#__PURE__*/React.createElement("div", {
     className: "space-y-1"
-  }, (byDate.get(dayOpen) || []).map(t => /*#__PURE__*/React.createElement("div", {
+  }, (byDate.get(dayOpen) || []).map((t, ti, ttarr) => /*#__PURE__*/React.createElement("div", {
     key: t.id,
     className: "flex items-center gap-2 border border-neutral-200 rounded-lg px-2 py-1 text-sm"
-  }, /*#__PURE__*/React.createElement("input", {
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col leading-none shrink-0"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => reorderDay(dayOpen, t.id, -1),
+    disabled: ti === 0,
+    className: "text-neutral-400 hover:text-neutral-800 disabled:opacity-20 text-xs"
+  }, "▲"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => reorderDay(dayOpen, t.id, 1),
+    disabled: ti === ttarr.length - 1,
+    className: "text-neutral-400 hover:text-neutral-800 disabled:opacity-20 text-xs"
+  }, "▼")), /*#__PURE__*/React.createElement("input", {
     type: "checkbox",
     checked: t.done,
     onChange: e => toggleDone(t, e.target.checked),
@@ -935,22 +1063,29 @@ function App({ initialData, onPersist }) {
     },
     className: `text-left flex-1 truncate ${t.done ? "line-through opacity-40" : ""}`
   }, t.isReport ? "📊 " : "", /*#__PURE__*/React.createElement("b", null, t.customer.name), " · ", t.product ? `${t.product.name} · ` : "", t.step), /*#__PURE__*/React.createElement("span", {
-    className: `text-xs text-white px-2 py-px rounded-full ${MANAGER_COLORS[t.customer.manager]}`
+    className: `text-xs text-white px-2 py-px rounded-full ${colorOf(t.customer.manager)}`
   }, t.customer.manager))))), addTaskDate && /*#__PURE__*/React.createElement(AddTaskPanel, {
     target: addTaskDate,
-    managers: MANAGERS,
+    managers: managerNames,
     onClose: () => setAddTaskDate(null),
     onSave: pt => {
       setPersonalTasks(p => [...p, pt]);
       setAddTaskDate(null);
     }
   }), panel === "register" && /*#__PURE__*/React.createElement(RegisterPanel, {
+    managerNames: managerNames,
     onClose: () => setPanel(null),
     onSave: c => {
       setCustomers(cs => [...cs, c]);
       setPanel(null);
     }
+  }), panel === "managers" && /*#__PURE__*/React.createElement(ManagersPanel, {
+    managers: managers,
+    setManagers: setManagers,
+    customers: customers,
+    onClose: () => setPanel(null)
   }), panel === "leave" && /*#__PURE__*/React.createElement(LeavePanel, {
+    managerNames: managerNames,
     leaves: leaves,
     setLeaves: setLeaves,
     onClose: () => setPanel(null)
@@ -978,6 +1113,72 @@ const MODE_LABEL = {
   wr: "주리포트 연동",
   manual: "수동설정"
 };
+// 고객사별 "추가 업무" 입력 행
+function AddStepRow({ onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [mode, setMode] = useState("d");
+  const [arg, setArg] = useState(0);
+  const [wdays, setWdays] = useState([1]);
+  const [mdays, setMdays] = useState("1");
+  const submit = () => {
+    const nm = name.trim();
+    if (!nm) return;
+    let a;
+    if (mode === "d") a = Number(arg) || 0;else if (mode === "w") a = wdays.length ? wdays : [1];else if (mode === "md") a = mdays.split(",").map(x => parseInt(x.trim(), 10)).filter(x => x >= 1 && x <= 31);else a = undefined;
+    onAdd({ name: nm, mode, arg: a });
+    setName("");
+    setMode("d");
+    setArg(0);
+    setWdays([1]);
+    setMdays("1");
+    setOpen(false);
+  };
+  if (!open) return /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOpen(true),
+    className: "w-full border border-dashed border-neutral-300 rounded-lg px-3 py-2 text-sm text-neutral-500 hover:bg-neutral-50"
+  }, "＋ 이 상품에 업무 추가");
+  return /*#__PURE__*/React.createElement("div", {
+    className: "border border-emerald-300 rounded-lg p-3 space-y-2 bg-emerald-50"
+  }, /*#__PURE__*/React.createElement("input", {
+    value: name,
+    onChange: e => setName(e.target.value),
+    autoFocus: true,
+    placeholder: "업무 이름 (예: 별도 리포트)",
+    className: "w-full border border-neutral-300 rounded px-2 py-1 text-sm"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-2 flex-wrap"
+  }, /*#__PURE__*/React.createElement("select", {
+    value: mode,
+    onChange: e => setMode(e.target.value),
+    className: "text-xs border border-neutral-300 rounded px-2 py-1 bg-white"
+  }, /*#__PURE__*/React.createElement("option", { value: "d" }, "디데이(D±N)"), /*#__PURE__*/React.createElement("option", { value: "w" }, "반복 요일"), /*#__PURE__*/React.createElement("option", { value: "daily" }, "매일"), /*#__PURE__*/React.createElement("option", { value: "md" }, "매월 특정일"), /*#__PURE__*/React.createElement("option", { value: "wr" }, "주리포트 연동")), mode === "d" && /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: arg,
+    onChange: e => setArg(e.target.value),
+    className: "w-16 border border-neutral-300 rounded px-2 py-1 text-sm text-center"
+  }), mode === "w" && /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-1"
+  }, [1, 2, 3, 4, 5].map(w => /*#__PURE__*/React.createElement("button", {
+    key: w,
+    onClick: () => setWdays(cur => cur.includes(w) ? cur.filter(x => x !== w) : [...cur, w].sort()),
+    className: `w-6 h-6 rounded text-xs border ${wdays.includes(w) ? "bg-neutral-900 text-white border-neutral-900" : "bg-white border-neutral-300"}`
+  }, WEEKDAYS[w]))), mode === "md" && /*#__PURE__*/React.createElement("input", {
+    value: mdays,
+    onChange: e => setMdays(e.target.value),
+    placeholder: "예: 1,15",
+    className: "w-20 border border-neutral-300 rounded px-2 py-1 text-sm"
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-2"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: submit,
+    disabled: !name.trim(),
+    className: "px-3 py-1 rounded bg-emerald-700 text-white text-xs font-semibold disabled:opacity-40 hover:bg-emerald-800"
+  }, "추가"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOpen(false),
+    className: "px-3 py-1 rounded border border-neutral-300 text-xs"
+  }, "취소")));
+}
 function StepEditor({
   ownerId,
   pid,
@@ -1191,11 +1392,13 @@ function AddTaskPanel({
   }, "추가")));
 }
 function RegisterPanel({
+  managerNames,
   onClose,
   onSave
 }) {
+  const MG = managerNames && managerNames.length ? managerNames : MANAGERS;
   const [name, setName] = useState("");
-  const [manager, setManager] = useState(MANAGERS[0]);
+  const [manager, setManager] = useState(MG[0]);
   const [regDate, setRegDate] = useState(TODAY);
   const [products, setProducts] = useState([]);
   const [weeklyReportDay, setWeeklyReportDay] = useState(3);
@@ -1226,7 +1429,7 @@ function RegisterPanel({
     value: manager,
     onChange: e => setManager(e.target.value),
     className: "mt-1 w-full border border-neutral-300 rounded-lg px-3 py-2 bg-white"
-  }, MANAGERS.map(mg => /*#__PURE__*/React.createElement("option", {
+  }, MG.map(mg => /*#__PURE__*/React.createElement("option", {
     key: mg
   }, mg)))), /*#__PURE__*/React.createElement("label", {
     className: "text-sm"
@@ -1290,11 +1493,13 @@ function RegisterPanel({
   }, "등록하고 일정 자동 생성")));
 }
 function LeavePanel({
+  managerNames,
   leaves,
   setLeaves,
   onClose
 }) {
-  const [manager, setManager] = useState(MANAGERS[0]);
+  const MG = managerNames && managerNames.length ? managerNames : MANAGERS;
+  const [manager, setManager] = useState(MG[0]);
   const [date, setDate] = useState(TODAY);
   return /*#__PURE__*/React.createElement(Overlay, {
     onClose: onClose,
@@ -1307,7 +1512,7 @@ function LeavePanel({
     value: manager,
     onChange: e => setManager(e.target.value),
     className: "border border-neutral-300 rounded-lg px-3 py-2 bg-white text-sm"
-  }, MANAGERS.map(mg => /*#__PURE__*/React.createElement("option", {
+  }, MG.map(mg => /*#__PURE__*/React.createElement("option", {
     key: mg
   }, mg))), /*#__PURE__*/React.createElement("input", {
     type: "date",
@@ -1412,6 +1617,66 @@ function TaskManagePanel({
     className: "shrink-0 text-xs text-rose-500 hover:text-rose-700 hover:underline"
   }, "삭제")))));
 }
+// 담당자 추가/삭제 패널
+function ManagersPanel({
+  managers,
+  setManagers,
+  customers,
+  onClose
+}) {
+  const [name, setName] = useState("");
+  const countFor = n => customers.filter(c => c.manager === n).length;
+  const add = () => {
+    const nm = name.trim();
+    if (!nm || managers.some(m => m.name === nm)) return;
+    const color = MANAGER_PALETTE[managers.length % MANAGER_PALETTE.length];
+    setManagers(ms => [...ms, { name: nm, color }]);
+    setName("");
+  };
+  const remove = n => {
+    const cnt = countFor(n);
+    const msg = cnt > 0 ? `'${n}' 담당자를 삭제할까요?\n담당 고객사 ${cnt}곳이 있습니다. (고객사는 유지되지만 담당자 표시가 회색이 됩니다)` : `'${n}' 담당자를 삭제할까요?`;
+    if (window.confirm(msg)) setManagers(ms => ms.filter(m => m.name !== n));
+  };
+  return /*#__PURE__*/React.createElement(Overlay, {
+    title: "담당자 관리",
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-neutral-500 mb-3"
+  }, "담당자를 추가/삭제합니다. 퇴사자는 삭제하세요. (삭제해도 기존 고객사·업무 데이터는 유지됩니다)"), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-2 mb-4"
+  }, /*#__PURE__*/React.createElement("input", {
+    value: name,
+    onChange: e => setName(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter") add();
+    },
+    placeholder: "새 담당자 이름",
+    className: "flex-1 border border-neutral-300 rounded-lg px-3 py-2 text-sm"
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: add,
+    disabled: !name.trim(),
+    className: "px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm font-semibold disabled:opacity-40 hover:bg-emerald-800"
+  }, "추가")), /*#__PURE__*/React.createElement("div", {
+    className: "space-y-1"
+  }, managers.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-neutral-400"
+  }, "담당자가 없습니다."), managers.map(m => /*#__PURE__*/React.createElement("div", {
+    key: m.name,
+    className: "flex items-center justify-between border border-neutral-200 rounded-lg px-3 py-2 text-sm"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "flex items-center gap-2"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: `w-3 h-3 rounded-full inline-block ${m.color}`
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "font-semibold"
+  }, m.name), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-neutral-400"
+  }, "담당 ", countFor(m.name), "곳")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => remove(m.name),
+    className: "text-neutral-400 hover:text-rose-600 text-xs"
+  }, "삭제")))));
+}
 function Overlay({
   title,
   children,
@@ -1442,7 +1707,11 @@ const SEED_DOC = {
   holidays: DEFAULT_HOLIDAYS,
   overrides: {},
   managerSteps: {},
-  personalTasks: []
+  personalTasks: [],
+  managers: DEFAULT_MANAGERS,
+  stepDisabled: {},
+  stepExtras: {},
+  taskOrder: {}
 };
 const pickDoc = res => ({
   customers: res.customers || [],
@@ -1450,7 +1719,12 @@ const pickDoc = res => ({
   holidays: res.holidays || [],
   overrides: res.overrides || {},
   managerSteps: res.managerSteps || {},
-  personalTasks: res.personalTasks || []
+  personalTasks: res.personalTasks || [],
+  // 기존 DB(마이그레이션 전)엔 managers 가 비어있음 → 기본 담당자로 폴백
+  managers: res.managers && res.managers.length ? res.managers : DEFAULT_MANAGERS,
+  stepDisabled: res.stepDisabled || {},
+  stepExtras: res.stepExtras || {},
+  taskOrder: res.taskOrder || {}
 });
 function MapoApp() {
   const [state, setState] = useState({ status: "loading", data: null, configured: false });

@@ -30,7 +30,14 @@ mapo.html            # 원본 프로토타입 (참고용 보존)
 - [x] **2·3단계(코드)** Supabase 스키마 + 연결/자동저장 코드 완성 — Supabase 값만 넣으면 작동
 - [ ] **연결** Supabase 프로젝트 생성 → 스키마 실행 → `.env.local` 설정 (아래)
 - [x] **4단계** 팀 공용 비밀번호 인증(`middleware.ts` + `/login`)
-- [ ] **5단계** Vercel 배포
+- [x] **5단계** Vercel 배포 (GitHub `padohoon/mapo2026` 연결 · `git push` 시 자동 재배포)
+
+## 배포 / 운영
+- **저장소**: github.com/padohoon/mapo2026 (main 브랜치)
+- **호스팅**: Vercel (Next.js 자동 감지). `git push` 하면 자동 재배포.
+- **Vercel 환경변수 3개 필수**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `APP_PASSWORD`
+  - ⚠️ `APP_PASSWORD` 미설정 시 사이트가 무인증 공개됨
+- 코드 수정 → 커밋 → 푸시 → 자동 배포. 환경변수 변경 시엔 Vercel 대시보드에서 수정 후 재배포.
 
 ## 인증 (팀 공용 비밀번호)
 - `APP_PASSWORD` 환경변수로 켜짐/꺼짐. **설정하면** 모든 경로가 로그인 게이트로 보호됨. 없으면 인증 비활성(로컬 개발용).

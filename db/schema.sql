@@ -54,3 +54,27 @@ create table if not exists step_overrides (
   mode  text not null,         -- d | w | daily | md | wr
   arg   jsonb                  -- 숫자 또는 배열
 );
+
+-- 담당자 (추가/삭제 가능)
+create table if not exists managers (
+  name  text primary key,
+  color text not null,
+  ord   int  not null default 0
+);
+
+-- 고객사별 제외 세부업무
+create table if not exists step_disabled (
+  key text primary key
+);
+
+-- 고객사별 추가 세부업무
+create table if not exists step_extras (
+  key   text primary key,
+  steps jsonb not null default '[]'::jsonb
+);
+
+-- 당일 업무 정렬 순서
+create table if not exists task_order (
+  task_id text primary key,
+  ord     int not null default 0
+);

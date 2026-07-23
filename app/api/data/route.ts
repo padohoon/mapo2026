@@ -9,6 +9,7 @@ export async function GET() {
   const sb = getSupabase();
   if (!sb) return NextResponse.json({ configured: false });
 
+  // 기존 6개 테이블 (반드시 존재)
   const [c, l, h, p, to, so] = await Promise.all([
     sb.from("customers").select("*"),
     sb.from("leaves").select("*"),
@@ -21,6 +22,22 @@ export async function GET() {
   if (err) {
     return NextResponse.json({ configured: true, error: err.message }, { status: 500 });
   }
+
+  // 새 4개 테이블 (마이그레이션 전이면 없을 수 있음 → 에러 시 빈 값으로 취급)
+  const safe = async (fn: any) => {
+    try {
+      const r = await fn;
+      return r.error ? [] : r.data || [];
+    } catch {
+      return [];
+    }
+  };
+  const [mg, sd, se, tord] = await Promise.all([
+    safe(sb.from("managers").select("*").order("ord")),
+    safe(sb.from("step_disabled").select("*")),
+    safe(sb.from("step_extras").select("*")),
+    safe(sb.from("task_order").select("*")),
+  ]);
 
   const customers = (c.data || []).map((r: any) => ({
     id: r.id,
@@ -57,6 +74,20 @@ export async function GET() {
     managerSteps[r.key] = { mode: r.mode, arg: r.arg };
   });
 
+  const managers = (mg as any[]).map((r) => ({ name: r.name, color: r.color }));
+  const stepDisabled: Record<string, boolean> = {};
+  (sd as any[]).forEach((r) => {
+    stepDisabled[r.key] = true;
+  });
+  const stepExtras: Record<string, any> = {};
+  (se as any[]).forEach((r) => {
+    stepExtras[r.key] = r.steps || [];
+  });
+  const taskOrder: Record<string, number> = {};
+  (tord as any[]).forEach((r) => {
+    taskOrder[r.task_id] = r.ord;
+  });
+
   return NextResponse.json({
     configured: true,
     customers,
@@ -65,6 +96,10 @@ export async function GET() {
     personalTasks,
     overrides,
     managerSteps,
+    managers,
+    stepDisabled,
+    stepExtras,
+    taskOrder,
   });
 }
 
@@ -107,7 +142,24 @@ export async function PUT(req: Request) {
     ([key, v]: [string, any]) => ({ key, mode: v.mode, arg: v.arg ?? null })
   );
 
-  const tables: Array<[string, any[], string]> = [
+  // 새 슬라이스
+  const managers = (doc.managers || []).map((m: any, i: number) => ({
+    name: m.name,
+    color: m.color,
+    ord: i,
+  }));
+  const stepDisabled = Object.entries(doc.stepDisabled || {})
+    .filter(([, v]) => !!v)
+    .map(([key]) => ({ key }));
+  const stepExtras = Object.entries(doc.stepExtras || {})
+    .filter(([, v]: [string, any]) => Array.isArray(v) && v.length > 0)
+    .map(([key, v]) => ({ key, steps: v }));
+  const taskOrder = Object.entries(doc.taskOrder || {}).map(
+    ([task_id, ord]: [string, any]) => ({ task_id, ord })
+  );
+
+  // 기존 테이블: 오류 시 실패(hard)
+  const core: Array<[string, any[], string]> = [
     ["customers", customers, "id"],
     ["leaves", leaves, "id"],
     ["holidays", holidays, "date"],
@@ -115,8 +167,7 @@ export async function PUT(req: Request) {
     ["task_overrides", taskOverrides, "task_id"],
     ["step_overrides", stepOverrides, "key"],
   ];
-
-  for (const [table, rows, pk] of tables) {
+  for (const [table, rows, pk] of core) {
     const del = await sb.from(table).delete().not(pk, "is", null);
     if (del.error) {
       return NextResponse.json({ ok: false, error: `${table}: ${del.error.message}` }, { status: 500 });
@@ -126,6 +177,23 @@ export async function PUT(req: Request) {
       if (ins.error) {
         return NextResponse.json({ ok: false, error: `${table}: ${ins.error.message}` }, { status: 500 });
       }
+    }
+  }
+
+  // 새 테이블: 마이그레이션 전이면 없을 수 있음 → 오류는 무시(soft), 나머지는 계속 저장
+  const extra: Array<[string, any[], string]> = [
+    ["managers", managers, "name"],
+    ["step_disabled", stepDisabled, "key"],
+    ["step_extras", stepExtras, "key"],
+    ["task_order", taskOrder, "task_id"],
+  ];
+  for (const [table, rows, pk] of extra) {
+    try {
+      const del = await sb.from(table).delete().not(pk, "is", null);
+      if (del.error) continue;
+      if (rows.length) await sb.from(table).insert(rows);
+    } catch {
+      // 무시
     }
   }
 
