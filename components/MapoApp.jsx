@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useMemo } from 'react';
+import { toPng } from 'html-to-image';
 
 
 /* ──────────────────────────────────────────────
@@ -731,6 +732,25 @@ function App({ initialData, configured, emit, reload }) {
     }
   });
   const dateNumCls = (ds, dow) => ds === TODAY ? "bg-rose-500 text-white rounded-full px-1" : ds < TODAY ? "text-neutral-400" : dow === 0 ? "text-rose-600" : dow === 6 ? "text-sky-600" : "text-neutral-700";
+  // 현재 보기(캘린더 영역)를 PNG 이미지로 저장
+  const mainRef = React.useRef(null);
+  const [exporting, setExporting] = useState(false);
+  const exportImage = async () => {
+    const node = mainRef.current;
+    if (!node) return;
+    setExporting(true);
+    try {
+      const dataUrl = await toPng(node, { backgroundColor: "#ffffff", pixelRatio: 2, cacheBust: true });
+      const label = viewMode === "byCustomer" && pageCustomers.length === 1 ? pageCustomers[0].name : viewMode === "month" ? `${y}-${String(m + 1).padStart(2, "0")}` : "캘린더";
+      const a = document.createElement("a");
+      a.download = `마포_${label}_${TODAY}.png`;
+      a.href = dataUrl;
+      a.click();
+    } catch (e) {
+      alert("이미지 생성에 실패했습니다: " + (e && e.message ? e.message : e));
+    }
+    setExporting(false);
+  };
   return /*#__PURE__*/React.createElement("div", {
     className: "min-h-screen bg-neutral-50 text-neutral-900",
     style: {
@@ -777,7 +797,12 @@ function App({ initialData, configured, emit, reload }) {
   }, "일정 관리"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setPanel("register"),
     className: "text-sm px-4 py-2 rounded-lg bg-emerald-700 text-white font-semibold hover:bg-emerald-800"
-  }, "+ 고객사 등록"), /*#__PURE__*/React.createElement("span", {
+  }, "+ 고객사 등록"), /*#__PURE__*/React.createElement("button", {
+    onClick: exportImage,
+    disabled: exporting,
+    title: "현재 캘린더를 이미지(PNG)로 저장",
+    className: "text-sm px-3 py-2 rounded-lg border border-neutral-300 hover:bg-neutral-100 disabled:opacity-50"
+  }, exporting ? "생성 중…" : "🖼 이미지 저장"), /*#__PURE__*/React.createElement("span", {
     className: `text-xs self-center transition-opacity ${saving ? "text-emerald-600 opacity-100" : "text-neutral-300 opacity-100"}`
   }, saving ? "저장 중…" : "저장됨"), /*#__PURE__*/React.createElement("a", {
     href: "/api/logout",
@@ -881,6 +906,7 @@ function App({ initialData, configured, emit, reload }) {
   }, /*#__PURE__*/React.createElement("p", {
     className: "font-semibold text-neutral-600"
   }, "자동 배치 규칙"), /*#__PURE__*/React.createElement("p", null, "· 앵커 = 그 달 ", /*#__PURE__*/React.createElement("b", null, "월리포트 날짜"), " (매달 변경 가능)"), /*#__PURE__*/React.createElement("p", null, "· 디데이 업무: 월리포트 기준 ", /*#__PURE__*/React.createElement("b", null, "D±N 영업일")), /*#__PURE__*/React.createElement("p", null, "· 반복: 매주 요일 / 매일 / 매월 특정일 / 주리포트 연동"), /*#__PURE__*/React.createElement("p", null, "· 주말·공휴일 제외 계산"), /*#__PURE__*/React.createElement("p", null, "· 연차일 일반 업무 → ", /*#__PURE__*/React.createElement("b", null, "전날로 이동")), /*#__PURE__*/React.createElement("p", null, "· ", /*#__PURE__*/React.createElement("b", null, "리포트는 연차여도 유지"), ", 공휴일이면 ", /*#__PURE__*/React.createElement("b", null, "앞당김")), /*#__PURE__*/React.createElement("p", null, "· 오늘 = 빨간 표시 / 지난날 = 회색"), /*#__PURE__*/React.createElement("p", null, "· 체크박스 완료 줄긋기 · 칩 드래그로 날짜 이동"))), /*#__PURE__*/React.createElement("main", {
+    ref: mainRef,
     className: "flex-1 p-6 overflow-x-auto"
   }, viewMode === "month" ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-between mb-4"
