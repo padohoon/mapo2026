@@ -179,6 +179,8 @@ function App({ initialData, onPersist }) {
   const [stepDisabled, setStepDisabled] = useState(initialData.stepDisabled); // { "cid|pid|si": true }
   const [stepExtras, setStepExtras] = useState(initialData.stepExtras); // { "cid|pid": [{name,mode,arg}] }
   const [taskOrder, setTaskOrder] = useState(initialData.taskOrder); // { taskId: number }
+  const [undo, setUndo] = useState(null); // { message, restore }
+  const _undoTimer = React.useRef(null);
 
   const managerNames = managers.map((m) => m.name);
   const colorOf = (name) => (managers.find((m) => m.name === name) || {}).color || "bg-slate-500";
@@ -546,6 +548,17 @@ function App({ initialData, onPersist }) {
       return n;
     });
   };
+  // 삭제 후 6초간 실행취소 토스트
+  const showUndo = (message, restore) => {
+    if (_undoTimer.current) clearTimeout(_undoTimer.current);
+    setUndo({ message, restore });
+    _undoTimer.current = setTimeout(() => setUndo(null), 6000);
+  };
+  const doUndo = () => {
+    if (_undoTimer.current) clearTimeout(_undoTimer.current);
+    if (undo && undo.restore) undo.restore();
+    setUndo(null);
+  };
   const Chip = ({
     t,
     compact
@@ -682,10 +695,18 @@ function App({ initialData, onPersist }) {
     className: `text-xs text-white px-2 py-px rounded-full ${colorOf(c.manager)}`
   }, c.manager), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      if (window.confirm(`'${c.name}' 고객사를 삭제할까요?\n이 고객사의 자동 배치 업무가 모두 사라집니다. (되돌릴 수 없음)`)) {
+      if (window.confirm(`'${c.name}' 고객사를 삭제할까요?\n이 고객사의 자동 배치 업무가 모두 사라집니다. (삭제 후 6초 내 실행취소 가능)`)) {
+        const idx = customers.findIndex(x => x.id === c.id);
+        const removed = c;
         setCustomers(cs => cs.filter(x => x.id !== c.id));
         if (customerFilter === c.id) setCustomerFilter("전체");
         if (settingsCustomer === c.id) setSettingsCustomer(null);
+        showUndo(`'${removed.name}' 고객사를 삭제했습니다`, () => setCustomers(cs => {
+          if (cs.some(x => x.id === removed.id)) return cs;
+          const copy = cs.slice();
+          copy.splice(Math.min(idx, copy.length), 0, removed);
+          return copy;
+        }));
       }
     },
     title: "고객사 삭제",
@@ -1048,6 +1069,9 @@ function App({ initialData, onPersist }) {
       return n;
     }),
     onDelete: selected.personal ? () => {
+      const removed = personalTasks.find(x => x.id === selected.id);
+      const idx = personalTasks.findIndex(x => x.id === selected.id);
+      const removedOv = overrides[selected.id];
       setPersonalTasks(p => p.filter(x => x.id !== selected.id));
       setOverrides(o => {
         const n = {
@@ -1057,6 +1081,15 @@ function App({ initialData, onPersist }) {
         return n;
       });
       setSelected(null);
+      showUndo(`'${removed ? removed.title : "개인업무"}' 삭제했습니다`, () => {
+        if (removed) setPersonalTasks(p => {
+          if (p.some(x => x.id === removed.id)) return p;
+          const copy = p.slice();
+          copy.splice(Math.min(idx, copy.length), 0, removed);
+          return copy;
+        });
+        if (removed && removedOv) setOverrides(o => ({ ...o, [removed.id]: removedOv }));
+      });
     } : null
   }), dayOpen && /*#__PURE__*/React.createElement(Overlay, {
     title: `${dayOpen} 전체 업무 (${(byDate.get(dayOpen) || []).length}건)`,
@@ -1110,6 +1143,7 @@ function App({ initialData, onPersist }) {
     managers: managers,
     setManagers: setManagers,
     customers: customers,
+    showUndo: showUndo,
     onClose: () => setPanel(null)
   }), panel === "leave" && /*#__PURE__*/React.createElement(LeavePanel, {
     managerNames: managerNames,
@@ -1123,12 +1157,18 @@ function App({ initialData, onPersist }) {
   }), panel === "tasks" && /*#__PURE__*/React.createElement(TaskManagePanel, {
     personalTasks: personalTasks,
     setPersonalTasks: setPersonalTasks,
+    showUndo: showUndo,
     onAdd: () => {
       setPanel(null);
       setAddTaskDate(TODAY);
     },
     onClose: () => setPanel(null)
-  }));
+  }), undo && /*#__PURE__*/React.createElement("div", {
+    className: "fixed bottom-4 left-1/2 -translate-x-1/2 z-[100] bg-neutral-900 text-white rounded-xl shadow-2xl px-4 py-3 flex items-center gap-4 text-sm"
+  }, /*#__PURE__*/React.createElement("span", null, undo.message), /*#__PURE__*/React.createElement("button", {
+    onClick: doUndo,
+    className: "font-semibold text-emerald-300 hover:text-emerald-200 shrink-0"
+  }, "실행취소")));
 }
 
 // 담당자별 업무 방식(mode)+값(arg)을 편집하는 행 컴포넌트
@@ -1607,11 +1647,22 @@ function HolidayPanel({
 function TaskManagePanel({
   personalTasks,
   setPersonalTasks,
+  showUndo,
   onAdd,
   onClose
 }) {
   const sorted = [...personalTasks].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
-  const remove = id => setPersonalTasks(p => p.filter(x => x.id !== id));
+  const remove = id => {
+    const removed = personalTasks.find(x => x.id === id);
+    const idx = personalTasks.findIndex(x => x.id === id);
+    setPersonalTasks(p => p.filter(x => x.id !== id));
+    if (showUndo) showUndo(`'${removed ? removed.title : "개인업무"}' 삭제했습니다`, () => setPersonalTasks(p => {
+      if (!removed || p.some(x => x.id === removed.id)) return p;
+      const copy = p.slice();
+      copy.splice(Math.min(idx, copy.length), 0, removed);
+      return copy;
+    }));
+  };
   return /*#__PURE__*/React.createElement(Overlay, {
     title: `일정 관리 · 직접 추가한 업무 ${personalTasks.length}건`,
     onClose: onClose
@@ -1649,6 +1700,7 @@ function ManagersPanel({
   managers,
   setManagers,
   customers,
+  showUndo,
   onClose
 }) {
   const [name, setName] = useState("");
@@ -1663,7 +1715,17 @@ function ManagersPanel({
   const remove = n => {
     const cnt = countFor(n);
     const msg = cnt > 0 ? `'${n}' 담당자를 삭제할까요?\n담당 고객사 ${cnt}곳이 있습니다. (고객사는 유지되지만 담당자 표시가 회색이 됩니다)` : `'${n}' 담당자를 삭제할까요?`;
-    if (window.confirm(msg)) setManagers(ms => ms.filter(m => m.name !== n));
+    if (window.confirm(msg)) {
+      const idx = managers.findIndex(m => m.name === n);
+      const removed = managers[idx];
+      setManagers(ms => ms.filter(m => m.name !== n));
+      if (showUndo) showUndo(`'${n}' 담당자를 삭제했습니다`, () => setManagers(ms => {
+        if (ms.some(m => m.name === removed.name)) return ms;
+        const copy = ms.slice();
+        copy.splice(Math.min(idx, copy.length), 0, removed);
+        return copy;
+      }));
+    }
   };
   return /*#__PURE__*/React.createElement(Overlay, {
     title: "담당자 관리",
