@@ -963,9 +963,9 @@ function App({ initialData, onPersist }) {
         }, "제외"));
         return /*#__PURE__*/React.createElement("div", {
           key: si,
-          className: "flex items-start gap-2"
+          className: "flex items-stretch gap-2"
         }, /*#__PURE__*/React.createElement("div", {
-          className: "flex-1"
+          className: "flex-1 min-w-0"
         }, /*#__PURE__*/React.createElement(StepEditor, {
           ownerId: c.id,
           pid: settingsProd,
@@ -979,8 +979,8 @@ function App({ initialData, onPersist }) {
           })
         })), /*#__PURE__*/React.createElement("button", {
           onClick: toggleDisable,
-          title: "이 업무 제외",
-          className: "text-xs text-neutral-300 hover:text-rose-600 mt-2 shrink-0"
+          title: "이 업무를 이 고객사에서 제외",
+          className: "shrink-0 self-center text-xs font-semibold px-3 py-1.5 rounded-lg border border-neutral-300 text-neutral-600 hover:text-rose-600 hover:border-rose-300 hover:bg-rose-50"
         }, "제외"));
       }), (stepExtras[`${c.id}|${settingsProd}`] || []).map((es, ei) => /*#__PURE__*/React.createElement("div", {
         key: "x" + ei,
@@ -1214,9 +1214,9 @@ function StepEditor({
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-2"
   }, /*#__PURE__*/React.createElement("span", {
-    className: "flex-1 text-sm font-medium"
+    className: "flex-1 min-w-0 truncate text-sm font-medium"
   }, baseStep.name), /*#__PURE__*/React.createElement("span", {
-    className: "text-xs text-neutral-400"
+    className: "shrink-0 text-xs text-neutral-400"
   }, "기본: ", MODE_LABEL[baseStep.mode], baseStep.mode === "d" ? ` ${baseStep.arg >= 0 ? "+" : ""}${baseStep.arg}` : "", baseStep.mode === "w" ? ` (${baseStep.arg.map(w => WEEKDAYS[w]).join("·")})` : "", baseStep.mode === "md" ? ` (${baseStep.arg.join("·")}일)` : ""), isCustom && /*#__PURE__*/React.createElement("button", {
     onClick: reset,
     className: "text-xs text-neutral-400 hover:text-rose-600",
