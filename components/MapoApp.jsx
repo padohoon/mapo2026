@@ -232,6 +232,7 @@ function App({ initialData, configured, emit, reload }) {
   const [managerFilter, setManagerFilter] = useState("전체");
   const [customerFilter, setCustomerFilter] = useState("전체");
   const [byCustSel, setByCustSel] = useState([]); // 고객사별 페이지에서 선택한 고객사(빈 배열=전체)
+  const [deleteCust, setDeleteCust] = useState(null); // 삭제 확인 중인 고객사
   const [overrides, setOverrides] = useState(initialData.overrides);
   const [selected, setSelected] = useState(null);
   const [dayOpen, setDayOpen] = useState(null); // 날짜 상세 목록
@@ -687,6 +688,20 @@ function App({ initialData, configured, emit, reload }) {
     if (undo && undo.restore) undo.restore();
     setUndo(null);
   };
+  // 고객사 삭제 실행 (확인 모달에서 고객사명 입력 확인 후 호출)
+  const doDeleteCustomer = c => {
+    const idx = customers.findIndex(x => x.id === c.id);
+    setCustomers(cs => cs.filter(x => x.id !== c.id));
+    if (customerFilter === c.id) setCustomerFilter("전체");
+    if (settingsCustomer === c.id) setSettingsCustomer(null);
+    setByCustSel(sel => sel.filter(id => id !== c.id));
+    showUndo(`'${c.name}' 고객사를 삭제했습니다`, () => setCustomers(cs => {
+      if (cs.some(x => x.id === c.id)) return cs;
+      const copy = cs.slice();
+      copy.splice(Math.min(idx, copy.length), 0, c);
+      return copy;
+    }));
+  };
   const Chip = ({
     t,
     compact
@@ -846,21 +861,7 @@ function App({ initialData, configured, emit, reload }) {
   }, /*#__PURE__*/React.createElement("span", {
     className: `text-xs text-white px-2 py-px rounded-full ${colorOf(c.manager)}`
   }, c.manager), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      if (window.confirm(`'${c.name}' 고객사를 삭제할까요?\n이 고객사의 자동 배치 업무가 모두 사라집니다. (삭제 후 6초 내 실행취소 가능)`)) {
-        const idx = customers.findIndex(x => x.id === c.id);
-        const removed = c;
-        setCustomers(cs => cs.filter(x => x.id !== c.id));
-        if (customerFilter === c.id) setCustomerFilter("전체");
-        if (settingsCustomer === c.id) setSettingsCustomer(null);
-        showUndo(`'${removed.name}' 고객사를 삭제했습니다`, () => setCustomers(cs => {
-          if (cs.some(x => x.id === removed.id)) return cs;
-          const copy = cs.slice();
-          copy.splice(Math.min(idx, copy.length), 0, removed);
-          return copy;
-        }));
-      }
-    },
+    onClick: () => setDeleteCust(c),
     title: "고객사 삭제",
     className: "text-neutral-400 hover:text-rose-600 text-sm leading-none px-1"
   }, "✕"))), /*#__PURE__*/React.createElement("p", {
@@ -1377,12 +1378,57 @@ function App({ initialData, configured, emit, reload }) {
       setAddTaskDate(TODAY);
     },
     onClose: () => setPanel(null)
+  }), deleteCust && /*#__PURE__*/React.createElement(DeleteConfirmPanel, {
+    name: deleteCust.name,
+    onClose: () => setDeleteCust(null),
+    onConfirm: () => {
+      doDeleteCustomer(deleteCust);
+      setDeleteCust(null);
+    }
   }), undo && /*#__PURE__*/React.createElement("div", {
     className: "fixed bottom-4 left-1/2 -translate-x-1/2 z-[100] bg-neutral-900 text-white rounded-xl shadow-2xl px-4 py-3 flex items-center gap-4 text-sm"
   }, /*#__PURE__*/React.createElement("span", null, undo.message), /*#__PURE__*/React.createElement("button", {
     onClick: doUndo,
     className: "font-semibold text-emerald-300 hover:text-emerald-200 shrink-0"
   }, "실행취소")));
+}
+
+// 고객사 삭제 확인 — 고객사명을 정확히 입력해야 삭제 가능
+function DeleteConfirmPanel({
+  name,
+  onClose,
+  onConfirm
+}) {
+  const [text, setText] = useState("");
+  const match = text.trim() === name;
+  return /*#__PURE__*/React.createElement(Overlay, {
+    title: "고객사 삭제 확인",
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-neutral-600 mb-1"
+  }, "이 작업은 되돌리기 어렵습니다. 삭제하려면 아래에 ", /*#__PURE__*/React.createElement("b", null, "고객사명을 정확히"), " 입력하세요."), /*#__PURE__*/React.createElement("p", {
+    className: "text-sm mb-3"
+  }, "삭제할 고객사: ", /*#__PURE__*/React.createElement("b", {
+    className: "text-rose-600"
+  }, name)), /*#__PURE__*/React.createElement("input", {
+    value: text,
+    onChange: e => setText(e.target.value),
+    autoFocus: true,
+    onKeyDown: e => {
+      if (!e.nativeEvent.isComposing && e.keyCode !== 229 && e.key === "Enter" && match) onConfirm();
+    },
+    placeholder: `${name} 입력`,
+    className: "w-full border border-neutral-300 rounded-lg px-3 py-2 mb-3"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-2"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    className: "flex-1 py-2.5 rounded-lg border border-neutral-300 text-sm font-semibold hover:bg-neutral-100"
+  }, "취소"), /*#__PURE__*/React.createElement("button", {
+    onClick: onConfirm,
+    disabled: !match,
+    className: "flex-1 py-2.5 rounded-lg bg-rose-600 text-white text-sm font-bold disabled:opacity-40 hover:bg-rose-700"
+  }, "삭제")));
 }
 
 // 담당자별 업무 방식(mode)+값(arg)을 편집하는 행 컴포넌트
