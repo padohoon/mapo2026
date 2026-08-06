@@ -4,19 +4,37 @@ import { getSupabase } from "@/lib/supabase/server";
 export const dynamic = "force-dynamic";
 export const fetchCache = "force-no-store";
 
+// Supabase/PostgREST 는 한 번의 select 가 기본 1000행에서 잘린다.
+// (task_overrides 처럼 행이 1000개를 넘으면 일부가 조용히 누락됨 → 저장한 체크/이동이 리로드에서 사라져 되돌아가는 버그)
+// 아래 헬퍼로 1000행씩 끝까지 페이지네이션해서 "모든" 행을 가져온다.
+const PAGE = 1000;
+async function selectAll(sb: any, table: string, order?: string) {
+  const all: any[] = [];
+  for (let from = 0; ; from += PAGE) {
+    let q = sb.from(table).select("*").range(from, from + PAGE - 1);
+    if (order) q = q.order(order);
+    const r = await q;
+    if (r.error) return { data: null, error: r.error };
+    const rows = r.data || [];
+    all.push(...rows);
+    if (rows.length < PAGE) break; // 마지막 페이지
+  }
+  return { data: all, error: null };
+}
+
 // ── GET /api/data ── 모든 원천 데이터를 앱 상태 형태(camelCase)로 반환
 export async function GET() {
   const sb = getSupabase();
   if (!sb) return NextResponse.json({ configured: false });
 
-  // 기존 6개 테이블 (반드시 존재)
+  // 기존 6개 테이블 (반드시 존재) — 1000행 제한 없이 전부 로드
   const [c, l, h, p, to, so] = await Promise.all([
-    sb.from("customers").select("*"),
-    sb.from("leaves").select("*"),
-    sb.from("holidays").select("*").order("date"),
-    sb.from("personal_tasks").select("*"),
-    sb.from("task_overrides").select("*"),
-    sb.from("step_overrides").select("*"),
+    selectAll(sb, "customers"),
+    selectAll(sb, "leaves"),
+    selectAll(sb, "holidays", "date"),
+    selectAll(sb, "personal_tasks"),
+    selectAll(sb, "task_overrides"),
+    selectAll(sb, "step_overrides"),
   ]);
   const err = c.error || l.error || h.error || p.error || to.error || so.error;
   if (err) {
@@ -24,26 +42,30 @@ export async function GET() {
   }
 
   // 새 4개 테이블 (마이그레이션 전이면 없을 수 있음 → 에러 시 빈 값으로 취급)
-  const safe = async (fn: any) => {
+  const safe = async (pr: Promise<any>) => {
     try {
-      const r = await fn;
+      const r = await pr;
       return r.error ? [] : r.data || [];
     } catch {
       return [];
     }
   };
   const [mg, sd, se, tord] = await Promise.all([
-    safe(sb.from("managers").select("*").order("ord")),
-    safe(sb.from("step_disabled").select("*")),
-    safe(sb.from("step_extras").select("*")),
-    safe(sb.from("task_order").select("*")),
+    safe(selectAll(sb, "managers", "ord")),
+    safe(selectAll(sb, "step_disabled")),
+    safe(selectAll(sb, "step_extras")),
+    safe(selectAll(sb, "task_order")),
   ]);
+
+  // 날짜 값을 항상 "YYYY-MM-DD" 로 정규화 (컬럼이 timestamp/timestamptz 로 돼있어도
+  // 프론트가 쓰는 날짜 문자열과 형식이 어긋나 드래그 이동이 사라지던 문제 방지)
+  const ymd = (v: any) => (v == null ? v : String(v).slice(0, 10));
 
   const customers = (c.data || []).map((r: any) => ({
     id: r.id,
     name: r.name,
     manager: r.manager,
-    regDate: r.reg_date,
+    regDate: ymd(r.reg_date),
     products: r.products || [],
     weeklyReportDay: r.weekly_report_day,
     monthlyReportDate: r.monthly_report_date,
@@ -51,11 +73,11 @@ export async function GET() {
       ? { mrOverrides: r.mr_overrides }
       : {}),
   }));
-  const leaves = (l.data || []).map((r: any) => ({ manager: r.manager, date: r.date }));
-  const holidays = (h.data || []).map((r: any) => [r.date, r.name]);
+  const leaves = (l.data || []).map((r: any) => ({ manager: r.manager, date: ymd(r.date) }));
+  const holidays = (h.data || []).map((r: any) => [ymd(r.date), r.name]);
   const personalTasks = (p.data || []).map((r: any) => ({
     id: r.id,
-    date: r.date,
+    date: ymd(r.date),
     title: r.title,
     manager: r.manager,
     customerId: r.customer_id,
@@ -65,7 +87,7 @@ export async function GET() {
   const overrides: Record<string, any> = {};
   (to.data || []).forEach((r: any) => {
     const o: any = {};
-    if (r.date != null) o.date = r.date;
+    if (r.date != null) o.date = ymd(r.date);
     if (r.done != null) o.done = r.done;
     overrides[r.task_id] = o;
   });

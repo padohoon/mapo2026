@@ -252,6 +252,7 @@ function App({ initialData, configured, emit, reload }) {
   const [taskOrder, setTaskOrder] = useState(initialData.taskOrder); // { taskId: number }
   const [undo, setUndo] = useState(null); // { message, restore }
   const _undoTimer = React.useRef(null);
+  const _dragId = React.useRef(null); // 드래그 중인 업무 id 백업 (일부 브라우저에서 dataTransfer 가 비어 반환되는 문제 대비)
 
   const managerNames = managers.map((m) => m.name);
   const colorOf = (name) => (managers.find((m) => m.name === name) || {}).color || "bg-slate-500";
@@ -275,8 +276,8 @@ function App({ initialData, configured, emit, reload }) {
       const send = computeOps(_synced.current, latest);
       if (send.length === 0) return;
       setSaving(true);
-      await emit(send);
-      _synced.current = latest;
+      const ok = await emit(send);
+      if (ok) _synced.current = latest; // 저장 성공 시에만 동기화 지점 전진 (실패 시 폴링이 재전송하고, 그 전엔 폴링이 덮어쓰지 않음)
       setSaving(false);
     }, 500);
     return () => clearTimeout(h);
@@ -321,7 +322,14 @@ function App({ initialData, configured, emit, reload }) {
     const iv = setInterval(async () => {
       if (typeof document !== "undefined" && document.hidden) return;
       if (Date.now() - _lastEdit.current < 3000) return; // 최근 편집 중이면 스킵
-      if (computeOps(_synced.current, _docRef.current).length > 0) return; // 미전송 변경 있음
+      // 미전송(또는 저장 실패로 남아있는) 로컬 변경이 있으면 서버본으로 덮지 말고 재전송한다
+      const pending = computeOps(_synced.current, _docRef.current);
+      if (pending.length > 0) {
+        const latest = _docRef.current;
+        const ok = await emit(pending);
+        if (ok) _synced.current = latest;
+        return; // 이번 주기엔 서버본을 적용하지 않음 (내 변경 보호)
+      }
       const doc = await reload();
       if (!alive || !doc) return;
       if (Date.now() - _lastEdit.current < 3000) return; // 재확인
@@ -332,7 +340,7 @@ function App({ initialData, configured, emit, reload }) {
       alive = false;
       clearInterval(iv);
     };
-  }, [configured, reload]);
+  }, [configured, reload, emit]);
 
   const holidayMap = useMemo(() => {
     const m = new Map();
@@ -708,6 +716,7 @@ function App({ initialData, configured, emit, reload }) {
   }) => /*#__PURE__*/React.createElement("div", {
     draggable: true,
     onDragStart: e => {
+      _dragId.current = t.id;
       e.dataTransfer.setData("text/plain", t.id);
       e.dataTransfer.effectAllowed = "move";
     },
@@ -735,14 +744,13 @@ function App({ initialData, configured, emit, reload }) {
     onDragLeave: () => setDragOver(v => v === ds ? null : v),
     onDrop: e => {
       e.preventDefault();
-      const id = e.dataTransfer.getData("text/plain");
-      if (id) setOverrides(o => ({
-        ...o,
-        [id]: {
-          ...o[id],
-          date: ds
-        }
-      }));
+      const id = e.dataTransfer.getData("text/plain") || _dragId.current;
+      _dragId.current = null;
+      if (id) setOverrides(o => {
+        const prev = o[id] || {};
+        if (prev.date === ds) return o; // 같은 날짜면 변경 없음
+        return { ...o, [id]: { ...prev, date: ds } };
+      });
       setDragOver(null);
     }
   });
@@ -2079,19 +2087,20 @@ const pickDoc = res => ({
 });
 // 행 단위 변경 전송
 function sendOps(ops, keepalive) {
-  if (!ops || ops.length === 0) return Promise.resolve();
+  if (!ops || ops.length === 0) return Promise.resolve(true);
+  // 저장 성공 여부(HTTP 2xx)를 boolean 으로 반환 — 실패 시 호출부가 동기화 지점을 전진시키지 않음
   return fetch("/api/mutate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ops }),
     keepalive: !!keepalive
-  }).catch(() => {});
+  }).then(r => r.ok).catch(() => false);
 }
 function MapoApp() {
   const [state, setState] = useState({ status: "loading", data: null, configured: false });
   React.useEffect(() => {
     let alive = true;
-    fetch("/api/data").then(r => r.json()).then(res => {
+    fetch("/api/data", { cache: "no-store" }).then(r => r.json()).then(res => {
       if (!alive) return;
       if (res && res.configured && !res.error) {
         const empty = !res.customers || res.customers.length === 0;
@@ -2119,7 +2128,7 @@ function MapoApp() {
   const emit = React.useCallback((ops, keepalive) => sendOps(ops, keepalive), []);
   const reload = React.useCallback(async () => {
     try {
-      const res = await fetch("/api/data").then(r => r.json());
+      const res = await fetch("/api/data", { cache: "no-store" }).then(r => r.json());
       if (res && res.configured && !res.error) return pickDoc(res);
     } catch (e) {}
     return null;
