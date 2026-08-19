@@ -83,6 +83,7 @@ const stepLabel = s => {
   if (s.mode === "w") return `매주 ${s.arg.map(w => WEEKDAYS[w]).join("·")}`;
   if (s.mode === "daily") return "매일";
   if (s.mode === "md") return `매월 ${s.arg.join("·")}일`;
+  if (s.mode === "nd") return `${s.arg}일 간격`;
   if (s.mode === "wr") return "주리포트 연동";
   return "수동설정";
 };
@@ -149,8 +150,8 @@ const mondayOf = d => {
 
 // ---------- 행 단위 diff (동시 편집 안전 저장용) ----------
 // 이전 동기화본(prev)과 현재 상태(cur)를 비교해 바뀐 행만 ops 로 만든다.
-const customerRow = c => ({ id: c.id, name: c.name, manager: c.manager, reg_date: c.regDate, weekly_report_day: c.weeklyReportDay, monthly_report_date: c.monthlyReportDate, products: c.products || [], mr_overrides: c.mrOverrides || {} });
-const personalRow = pt => ({ id: pt.id, date: pt.date, title: pt.title, manager: pt.manager, customer_id: pt.customerId ?? null, customer_name: pt.customerName ?? null, done: !!pt.done });
+const customerRow = c => ({ id: c.id, name: c.name, manager: c.manager, reg_date: c.regDate, weekly_report_day: c.weeklyReportDay, monthly_report_date: c.monthlyReportDate, products: c.products || [], mr_overrides: c.mrOverrides || {}, ord: c.ord ?? 0, no_weekly: !!c.noWeekly, no_monthly: !!c.noMonthly });
+const personalRow = pt => ({ id: pt.id, date: pt.date, title: pt.title, manager: pt.manager, customer_id: pt.customerId ?? null, customer_name: pt.customerName ?? null, done: !!pt.done, memo: pt.memo ?? null, repeat: pt.repeat ?? null, repeat_until: pt.repeatUntil ?? null });
 function diffArrById(ops, table, prevArr, curArr, pk, toRow) {
   const pm = new Map((prevArr || []).map(x => [x[pk], x]));
   const cm = new Map((curArr || []).map(x => [x[pk], x]));
@@ -201,8 +202,8 @@ function computeOps(prev, cur) {
     pm.forEach((_, name) => { if (!cm.has(name)) ops.push({ table: "managers", op: "delete", match: { name } }); });
   }
   diffMap(ops, "task_overrides", "task_id", prev.overrides, cur.overrides,
-    (k, v) => ({ task_id: k, date: v.date ?? null, done: v.done ?? null }),
-    v => v && (v.date != null || v.done != null));
+    (k, v) => ({ task_id: k, date: v.date ?? null, done: v.done ?? null, memo: v.memo ?? null }),
+    v => v && (v.date != null || v.done != null || v.memo != null));
   diffMap(ops, "step_overrides", "key", prev.managerSteps, cur.managerSteps,
     (k, v) => ({ key: k, mode: v.mode, arg: v.arg ?? null }));
   diffMap(ops, "step_disabled", "key", prev.stepDisabled, cur.stepDisabled,
@@ -211,6 +212,8 @@ function computeOps(prev, cur) {
     (k, v) => ({ key: k, steps: v }), v => Array.isArray(v) && v.length > 0);
   diffMap(ops, "task_order", "task_id", prev.taskOrder, cur.taskOrder,
     (k, v) => ({ task_id: k, ord: v }));
+  diffMap(ops, "product_qty", "key", prev.productQty, cur.productQty,
+    (k, v) => ({ key: k, qty: Number(v) }), v => Number(v) > 0);
   return ops;
 }
 const DEFAULT_MANAGER_OPS = () => DEFAULT_MANAGERS.map((m, i) => ({ table: "managers", op: "upsert", row: { name: m.name, color: m.color, ord: i } }));
@@ -250,6 +253,7 @@ function App({ initialData, configured, emit, reload }) {
   const [stepDisabled, setStepDisabled] = useState(initialData.stepDisabled); // { "cid|pid|si": true }
   const [stepExtras, setStepExtras] = useState(initialData.stepExtras); // { "cid|pid": [{name,mode,arg}] }
   const [taskOrder, setTaskOrder] = useState(initialData.taskOrder); // { taskId: number }
+  const [productQty, setProductQty] = useState(initialData.productQty || {}); // { "cid|pid": number }
   const [undo, setUndo] = useState(null); // { message, restore }
   const _undoTimer = React.useRef(null);
   const _dragId = React.useRef(null); // 드래그 중인 업무 id 백업 (일부 브라우저에서 dataTransfer 가 비어 반환되는 문제 대비)
@@ -262,7 +266,7 @@ function App({ initialData, configured, emit, reload }) {
   const _synced = React.useRef(initialData); // 마지막으로 서버와 맞춘 문서
   const _lastEdit = React.useRef(0); // 마지막 로컬 편집 시각
   const _docRef = React.useRef(initialData); // 최신 상태 스냅샷(폴링에서 참조)
-  const curDoc = { customers, leaves, holidays, overrides, managerSteps, personalTasks, managers, stepDisabled, stepExtras, taskOrder };
+  const curDoc = { customers, leaves, holidays, overrides, managerSteps, personalTasks, managers, stepDisabled, stepExtras, taskOrder, productQty };
   _docRef.current = curDoc;
 
   // 변경분(diff)을 디바운스 후 전송 — 바뀐 행만 보내므로 동시 편집 충돌 없음
@@ -281,7 +285,7 @@ function App({ initialData, configured, emit, reload }) {
       setSaving(false);
     }, 500);
     return () => clearTimeout(h);
-  }, [customers, leaves, holidays, overrides, managerSteps, personalTasks, managers, stepDisabled, stepExtras, taskOrder, configured, emit]);
+  }, [customers, leaves, holidays, overrides, managerSteps, personalTasks, managers, stepDisabled, stepExtras, taskOrder, productQty, configured, emit]);
 
   // 이탈/새로고침 시 미전송 변경을 즉시 전송(keepalive)
   React.useEffect(() => {
@@ -316,6 +320,7 @@ function App({ initialData, configured, emit, reload }) {
       setStepDisabled(doc.stepDisabled);
       setStepExtras(doc.stepExtras);
       setTaskOrder(doc.taskOrder);
+      setProductQty(doc.productQty || {});
       _synced.current = doc;
       _docRef.current = doc;
     };
@@ -399,9 +404,8 @@ function App({ initialData, configured, emit, reload }) {
     };
   };
 
-  // ---------- 업무 자동 생성 ----------
-  const tasks = useMemo(() => {
-    const out = [];
+  // 현재 화면(월간 ±1, 주간 ±1)에 해당하는 달 목록 — 자동업무/개인업무 반복 전개에 공통 사용
+  const winMonths = useMemo(() => {
     const keys = new Set();
     const addMonth = (yy, mm) => {
       const d = new Date(yy, mm, 1);
@@ -409,7 +413,13 @@ function App({ initialData, configured, emit, reload }) {
     };
     [-1, 0, 1].forEach(k => addMonth(viewYM.y, viewYM.m + k));
     [-1, 0, 1].forEach(k => addMonth(weekStart.getFullYear(), weekStart.getMonth() + k));
-    const months = [...keys].map(s => s.split("-").map(Number));
+    return [...keys].map(s => s.split("-").map(Number));
+  }, [viewYM, weekStart]);
+
+  // ---------- 업무 자동 생성 ----------
+  const tasks = useMemo(() => {
+    const out = [];
+    const months = winMonths;
     customers.forEach(c => {
       const reg = parse(c.regDate);
       months.forEach(([yy, mm]) => {
@@ -435,7 +445,8 @@ function App({ initialData, configured, emit, reload }) {
             }
           }
           mrPlaced = date;
-          out.push({
+          // 월리포트 자체는 noMonthly 고객사면 만들지 않음 (단, mrPlaced 앵커는 D±N 업무 배치용으로 계속 사용)
+          if (!c.noMonthly) out.push({
             id: `${c.id}|mr|${cycleKey}`,
             customer: c,
             product: null,
@@ -466,7 +477,8 @@ function App({ initialData, configured, emit, reload }) {
             }
           }
           wrDates.push(date);
-          out.push({
+          // 주리포트 자체는 noWeekly 고객사면 만들지 않음 (wr 연동 업무 앵커로는 계속 사용)
+          if (!c.noWeekly) out.push({
             id: `${c.id}|wr|${fmt(d)}`,
             customer: c,
             product: null,
@@ -560,6 +572,23 @@ function App({ initialData, configured, emit, reload }) {
                 }
                 push(date, shifted, `wr${fmt(wd)}`, `주리포트 연동${tag}`);
               });
+            } else if (s.mode === "nd") {
+              // N일 간격 반복: 고객사 등록일(regDate)을 기준으로 매 N일마다 (다채널 4주간격 등)
+              const N = Math.max(1, Number(s.arg) || 0);
+              if (N >= 1) {
+                for (let dd = 1; dd <= dim; dd++) {
+                  const d = new Date(yy, mm, dd);
+                  if (d < reg) continue;
+                  const diff = Math.round((d - reg) / 86400000);
+                  if (diff % N !== 0) continue;
+                  const {
+                    date,
+                    shifted
+                  } = placeGeneral(d, c.manager);
+                  if (date < reg) continue;
+                  push(date, customized ? shifted || "담당자 개별설정 적용" : shifted, `nd${fmt(d)}`, `${N}일 간격 (등록일 기준)${tag}`);
+                }
+              }
             }
             // manual: 자동 생성하지 않음 (수동설정)
           });
@@ -567,7 +596,7 @@ function App({ initialData, configured, emit, reload }) {
       });
     });
     return out;
-  }, [customers, viewYM, weekStart, holidayMap, leaveSet, managerSteps, stepDisabled, stepExtras]);
+  }, [customers, winMonths, holidayMap, leaveSet, managerSteps, stepDisabled, stepExtras]);
   const finalTasks = useMemo(() => {
     const auto = tasks.map(t => {
       const ov = overrides[t.id] || {};
@@ -578,12 +607,54 @@ function App({ initialData, configured, emit, reload }) {
         edited: !!ov.date
       };
     });
+    // 반복 개인업무의 날짜 목록을 화면 범위 안에서 생성
+    const occurrencesOf = pt => {
+      if (!pt.repeat) return [pt.date];
+      const start = parse(pt.date);
+      const until = pt.repeatUntil ? parse(pt.repeatUntil) : (() => { const u = new Date(start); u.setMonth(u.getMonth() + 6); return u; })();
+      // 화면에 보이는 달만 대상으로 (성능/개수 제한)
+      let winMin = null, winMax = null;
+      winMonths.forEach(([yy, mm]) => {
+        const a = new Date(yy, mm, 1), b = new Date(yy, mm + 1, 0);
+        if (!winMin || a < winMin) winMin = a;
+        if (!winMax || b > winMax) winMax = b;
+      });
+      const out = [];
+      if (pt.repeat === "weekly") {
+        let d = new Date(start);
+        while (d <= until) {
+          if ((!winMin || d >= winMin) && (!winMax || d <= winMax)) out.push(fmt(d));
+          d = addDays(d, 7);
+          if (winMax && d > winMax) break;
+        }
+      } else if (pt.repeat === "monthly") {
+        const anchorDay = start.getDate();
+        let y0 = start.getFullYear(), m0 = start.getMonth();
+        while (true) {
+          const dim = new Date(y0, m0 + 1, 0).getDate();
+          const d = new Date(y0, m0, Math.min(anchorDay, dim));
+          if (d > until) break;
+          if (d >= start && (!winMin || d >= winMin) && (!winMax || d <= winMax)) out.push(fmt(d));
+          m0++;
+          if (winMax && new Date(y0, m0, 1) > winMax) break;
+        }
+      }
+      return out.length ? out : [pt.date];
+    };
     // 개인 업무를 태스크 형태로 변환 (고객사 없이 담당자만 있을 수 있음)
-    const personal = personalTasks.map(pt => {
-      const ov = overrides[pt.id] || {};
+    const personal = personalTasks.flatMap(pt => occurrencesOf(pt).map(ds => {
+      // 반복 업무는 회차별 id(pt.id@날짜)로 완료/이동을 개별 관리, 단일 업무는 pt.id 그대로
+      const occId = pt.repeat ? `${pt.id}@${ds}` : pt.id;
+      const ov = overrides[occId] || {};
       return {
-        id: pt.id,
+        id: occId,
         personal: true,
+        repeatSrc: pt.repeat ? pt.id : null,
+        srcTitle: pt.title,
+        srcMemo: pt.memo || "",
+        srcRepeat: pt.repeat || "none",
+        srcRepeatUntil: pt.repeatUntil || "",
+        memo: ov.memo != null ? ov.memo : pt.memo,
         product: null,
         isReport: false,
         step: pt.title,
@@ -592,16 +663,16 @@ function App({ initialData, configured, emit, reload }) {
           name: pt.customerName || "개인업무",
           manager: pt.manager
         },
-        baseDate: pt.date,
-        date: ov.date || pt.date,
-        done: ov.done !== undefined ? !!ov.done : !!pt.done,
+        baseDate: ds,
+        date: ov.date || ds,
+        done: ov.done !== undefined ? !!ov.done : (pt.repeat ? false : !!pt.done),
         edited: !!ov.date,
         shifted: null,
-        mode: "직접 추가한 업무"
+        mode: pt.repeat === "weekly" ? "직접 추가 · 매주 반복" : pt.repeat === "monthly" ? "직접 추가 · 매달 반복" : "직접 추가한 업무"
       };
-    });
+    }));
     return [...auto, ...personal];
-  }, [tasks, overrides, personalTasks]);
+  }, [tasks, overrides, personalTasks, winMonths]);
   const passFilter = t => (managerFilter === "전체" || t.customer.manager === managerFilter) && (customerFilter === "전체" || t.customer.id === customerFilter || t.personal);
   const byDate = useMemo(() => {
     const map = new Map();
@@ -645,6 +716,8 @@ function App({ initialData, configured, emit, reload }) {
     length: 7
   }, (_, i) => addDays(weekStart, i));
   const visibleCustomers = customers.filter(c => (managerFilter === "전체" || c.manager === managerFilter) && (customerFilter === "전체" || c.id === customerFilter));
+  // 담당자 필터를 클릭하면 사이드바·업무설정의 고객사 목록도 그 담당자 것만 보이게 (#8)
+  const mgCustomers = managerFilter === "전체" ? customers : customers.filter(c => c.manager === managerFilter);
   // 고객사별 페이지: 체크박스로 선택한 고객사(비어있으면 전체) + 담당자 필터
   const pageCustomers = customers.filter(c => (byCustSel.length === 0 || byCustSel.includes(c.id)) && (managerFilter === "전체" || c.manager === managerFilter));
   const pageCustIds = new Set(pageCustomers.map(c => c.id));
@@ -685,6 +758,22 @@ function App({ initialData, configured, emit, reload }) {
       return n;
     });
   };
+  // 드래그로 당일 업무 순서 변경: dragId 를 targetId 위치로 옮김 (#9)
+  const _dayDragId = React.useRef(null);
+  const moveTaskTo = (ds, dragId, targetId) => {
+    if (!dragId || dragId === targetId) return;
+    const arr = (byDate.get(ds) || []).slice();
+    const from = arr.findIndex(t => t.id === dragId);
+    const to = arr.findIndex(t => t.id === targetId);
+    if (from < 0 || to < 0 || from === to) return;
+    const [item] = arr.splice(from, 1);
+    arr.splice(to, 0, item);
+    setTaskOrder(o => {
+      const n = { ...o };
+      arr.forEach((t, k) => { n[t.id] = k; });
+      return n;
+    });
+  };
   // 삭제 후 6초간 실행취소 토스트
   const showUndo = (message, restore) => {
     if (_undoTimer.current) clearTimeout(_undoTimer.current);
@@ -713,7 +802,10 @@ function App({ initialData, configured, emit, reload }) {
   const Chip = ({
     t,
     compact
-  }) => /*#__PURE__*/React.createElement("div", {
+  }) => {
+    const qty = t.product ? Number(productQty[`${t.customer.id}|${t.product.id}`]) || 0 : 0;
+    const hasMemo = !!(t.memo && String(t.memo).trim());
+    return /*#__PURE__*/React.createElement("div", {
     draggable: true,
     onDragStart: e => {
       _dragId.current = t.id;
@@ -734,7 +826,10 @@ function App({ initialData, configured, emit, reload }) {
     className: `truncate ${t.done ? "line-through" : ""}`
   }, t.isReport ? "📊 " : t.personal ? "👤 " : "", compact ? "" : `${t.customer.name.slice(0, 5)}·`, t.product ? /*#__PURE__*/React.createElement("b", {
     className: "font-semibold"
-  }, t.product.name) : null, t.product ? " · " : "", t.step, t.isReport && t.onLeaveDay ? " (연차중)" : ""));
+  }, t.product.name) : null, t.product ? " · " : "", t.step, t.isReport && t.onLeaveDay ? " (연차중)" : "", hasMemo ? " 📝" : ""), qty > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "shrink-0 ml-auto text-[10px] font-bold px-1 rounded bg-white/70 text-neutral-700 border border-neutral-300"
+  }, qty, "건"));
+  };
   const dropHandlers = ds => ({
     onDragOver: e => {
       e.preventDefault();
@@ -812,6 +907,9 @@ function App({ initialData, configured, emit, reload }) {
     onClick: () => setPanel("managers"),
     className: "text-sm px-3 py-2 rounded-lg border border-neutral-300 hover:bg-neutral-100"
   }, "담당자"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPanel("custSettings"),
+    className: "text-sm px-3 py-2 rounded-lg border border-neutral-300 hover:bg-neutral-100"
+  }, "고객사 설정"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setAddTaskDate(TODAY),
     className: "text-sm px-3 py-2 rounded-lg border border-emerald-700 text-emerald-700 font-semibold hover:bg-emerald-50"
   }, "+ 일정 추가"), /*#__PURE__*/React.createElement("button", {
@@ -849,15 +947,15 @@ function App({ initialData, configured, emit, reload }) {
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => setCustomerFilter("전체"),
     className: `text-xs px-2 py-1 rounded-full border ${customerFilter === "전체" ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300 hover:bg-neutral-100"}`
-  }, "전체"), customers.map((c, i) => /*#__PURE__*/React.createElement("button", {
+  }, "전체"), mgCustomers.map((c, i) => /*#__PURE__*/React.createElement("button", {
     key: c.id,
     onClick: () => setCustomerFilter(c.id),
     className: `text-xs px-2 py-1 rounded-full border ${customerFilter === c.id ? "bg-neutral-900 text-white border-neutral-900" : `${CUST_ROW[i % CUST_ROW.length].tag} border-transparent`}`
   }, c.name))), /*#__PURE__*/React.createElement("p", {
     className: "text-xs font-semibold text-neutral-500 mb-2"
-  }, "고객사 (", customers.length, ")"), /*#__PURE__*/React.createElement("div", {
+  }, "고객사 (", mgCustomers.length, ")"), /*#__PURE__*/React.createElement("div", {
     className: "space-y-2"
-  }, customers.map((c, i) => /*#__PURE__*/React.createElement("div", {
+  }, mgCustomers.map((c, i) => /*#__PURE__*/React.createElement("div", {
     key: c.id,
     className: `border border-neutral-200 rounded-lg p-3 ${CUST_ROW[i % CUST_ROW.length].row}`
   }, /*#__PURE__*/React.createElement("div", {
@@ -898,7 +996,7 @@ function App({ initialData, configured, emit, reload }) {
     },
     className: "text-xs border border-neutral-300 rounded px-1 py-px bg-white"
   }, Array.from({
-    length: 28
+    length: 31
   }, (_, k) => k + 1).map(dd => /*#__PURE__*/React.createElement("option", {
     key: dd,
     value: dd
@@ -1112,7 +1210,7 @@ function App({ initialData, configured, emit, reload }) {
     return /*#__PURE__*/React.createElement("div", {
       key: ds,
       ...dropHandlers(ds),
-      className: `min-h-24 p-1 transition-colors ${dragOver === ds ? "bg-emerald-50 ring-2 ring-inset ring-emerald-500" : today ? "bg-white ring-2 ring-inset ring-rose-400" : past ? "bg-neutral-100" : "bg-white"}`
+      className: `group min-h-24 p-1 transition-colors ${dragOver === ds ? "bg-emerald-50 ring-2 ring-inset ring-emerald-500" : today ? "bg-white ring-2 ring-inset ring-rose-400" : past ? "bg-neutral-100" : "bg-white"}`
     }, /*#__PURE__*/React.createElement("button", {
       onClick: () => setDayOpen(ds),
       className: `text-xs font-semibold px-1 hover:underline ${today ? "text-rose-500" : past ? "text-neutral-400" : "text-neutral-700"}`
@@ -1122,7 +1220,11 @@ function App({ initialData, configured, emit, reload }) {
       key: t.id,
       t: t,
       compact: pageCustomers.length === 1
-    }))));
+    }))), /*#__PURE__*/React.createElement("button", {
+      // 고객사 1곳만 선택 시엔 그 고객사 업무로, 아니면 개인업무로 추가 (#19)
+      onClick: () => setAddTaskDate(pageCustomers.length === 1 ? { date: ds, customerId: pageCustomers[0].id, customerName: pageCustomers[0].name, manager: pageCustomers[0].manager } : ds),
+      className: "w-full mt-px text-xs text-neutral-400 hover:text-emerald-700 hover:bg-emerald-50 rounded px-1 text-left opacity-0 group-hover:opacity-100 transition-opacity"
+    }, "+ 개인업무"));
   })))) :
   /*#__PURE__*/
   /* ===== 업무 설정 탭 (고객사 × 상품) ===== */
@@ -1134,7 +1236,7 @@ function App({ initialData, configured, emit, reload }) {
     className: "text-xs text-neutral-500"
   }, "고객사를 고르고 상품을 펼쳐 각 업무의 방식(디데이/반복요일 등)과 값을 개별 조정")), /*#__PURE__*/React.createElement("div", {
     className: "flex gap-2 mb-4 flex-wrap"
-  }, customers.map((c, i) => /*#__PURE__*/React.createElement("button", {
+  }, mgCustomers.map((c, i) => /*#__PURE__*/React.createElement("button", {
     key: c.id,
     onClick: () => {
       setSettingsCustomer(c.id);
@@ -1207,6 +1309,24 @@ function App({ initialData, configured, emit, reload }) {
         }),
         className: "text-xs text-neutral-500 underline"
       }, "이 상품 전체 기본값으로")), /*#__PURE__*/React.createElement("div", {
+        className: "flex items-center gap-2 mb-3 bg-neutral-50 border border-neutral-200 rounded-lg px-3 py-2"
+      }, /*#__PURE__*/React.createElement("span", {
+        className: "text-sm font-semibold text-neutral-600"
+      }, "상품 수량(건수)"), /*#__PURE__*/React.createElement("input", {
+        type: "number",
+        min: 0,
+        value: productQty[`${c.id}|${settingsProd}`] || 0,
+        onChange: e => setProductQty(o => {
+          const key = `${c.id}|${settingsProd}`;
+          const v = Math.max(0, Number(e.target.value) || 0);
+          const n = { ...o };
+          if (v > 0) n[key] = v; else delete n[key];
+          return n;
+        }),
+        className: "w-24 border border-neutral-300 rounded px-2 py-1 text-sm text-center"
+      }), /*#__PURE__*/React.createElement("span", {
+        className: "text-xs text-neutral-400"
+      }, "건 · 일정 칩 오른쪽에 표시됩니다 (0=숨김)")), /*#__PURE__*/React.createElement("div", {
         className: "space-y-2"
       }, p.steps.map((s0, si) => {
         const dkey = `${c.id}|${settingsProd}|${si}`;
@@ -1284,6 +1404,11 @@ function App({ initialData, configured, emit, reload }) {
         ...patch
       }
     })),
+    // 개인업무의 원본(내용/메모/반복) 수정 — 반복업무는 원본(repeatSrc)을 편집
+    onEditPersonal: selected.personal ? patch => {
+      const srcId = selected.repeatSrc || selected.id;
+      setPersonalTasks(p => p.map(x => x.id === srcId ? { ...x, ...patch } : x));
+    } : null,
     onReset: () => setOverrides(o => {
       const n = {
         ...o
@@ -1292,10 +1417,11 @@ function App({ initialData, configured, emit, reload }) {
       return n;
     }),
     onDelete: selected.personal ? () => {
-      const removed = personalTasks.find(x => x.id === selected.id);
-      const idx = personalTasks.findIndex(x => x.id === selected.id);
+      const srcId = selected.repeatSrc || selected.id;
+      const removed = personalTasks.find(x => x.id === srcId);
+      const idx = personalTasks.findIndex(x => x.id === srcId);
       const removedOv = overrides[selected.id];
-      setPersonalTasks(p => p.filter(x => x.id !== selected.id));
+      setPersonalTasks(p => p.filter(x => x.id !== srcId));
       setOverrides(o => {
         const n = {
           ...o
@@ -1304,7 +1430,7 @@ function App({ initialData, configured, emit, reload }) {
         return n;
       });
       setSelected(null);
-      showUndo(`'${removed ? removed.title : "개인업무"}' 삭제했습니다`, () => {
+      showUndo(`'${removed ? removed.title : "개인업무"}'${removed && removed.repeat ? " 반복 일정 전체를" : ""} 삭제했습니다`, () => {
         if (removed) setPersonalTasks(p => {
           if (p.some(x => x.id === removed.id)) return p;
           const copy = p.slice();
@@ -1319,12 +1445,19 @@ function App({ initialData, configured, emit, reload }) {
     onClose: () => setDayOpen(null)
   }, /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-neutral-500 mb-2"
-  }, "▲▼ 로 당일 업무 순서를 바꿀 수 있어요. 완료(체크)한 업무는 자동으로 맨 아래로 내려갑니다."), /*#__PURE__*/React.createElement("div", {
+  }, "▲▼ 또는 드래그(⠿)로 당일 업무 순서를 바꿀 수 있어요. 완료(체크)한 업무는 자동으로 맨 아래로 내려갑니다."), /*#__PURE__*/React.createElement("div", {
     className: "space-y-1"
   }, (byDate.get(dayOpen) || []).map((t, ti, ttarr) => /*#__PURE__*/React.createElement("div", {
     key: t.id,
-    className: "flex items-center gap-2 border border-neutral-200 rounded-lg px-2 py-1 text-sm"
-  }, /*#__PURE__*/React.createElement("div", {
+    draggable: true,
+    onDragStart: e => { _dayDragId.current = t.id; e.dataTransfer.effectAllowed = "move"; },
+    onDragOver: e => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; },
+    onDrop: e => { e.preventDefault(); moveTaskTo(dayOpen, _dayDragId.current, t.id); _dayDragId.current = null; },
+    className: "flex items-center gap-2 border border-neutral-200 rounded-lg px-2 py-1 text-sm bg-white"
+  }, /*#__PURE__*/React.createElement("span", {
+    title: "드래그로 이동",
+    className: "shrink-0 text-neutral-300 cursor-grab active:cursor-grabbing select-none"
+  }, "⠿"), /*#__PURE__*/React.createElement("div", {
     className: "flex flex-col leading-none shrink-0"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => reorderDay(dayOpen, t.id, -1),
@@ -1350,16 +1483,18 @@ function App({ initialData, configured, emit, reload }) {
   }, t.customer.manager))))), addTaskDate && /*#__PURE__*/React.createElement(AddTaskPanel, {
     target: addTaskDate,
     managers: managerNames,
+    customers: customers,
+    defaultManager: managerFilter !== "전체" ? managerFilter : null,
     onClose: () => setAddTaskDate(null),
-    onSave: pt => {
-      setPersonalTasks(p => [...p, pt]);
+    onSave: pts => {
+      setPersonalTasks(p => [...p, ...pts]);
       setAddTaskDate(null);
     }
   }), panel === "register" && /*#__PURE__*/React.createElement(RegisterPanel, {
     managerNames: managerNames,
     onClose: () => setPanel(null),
     onSave: c => {
-      setCustomers(cs => [...cs, c]);
+      setCustomers(cs => [...cs, { ...c, ord: cs.length }]);
       setPanel(null);
     }
   }), panel === "managers" && /*#__PURE__*/React.createElement(ManagersPanel, {
@@ -1367,6 +1502,11 @@ function App({ initialData, configured, emit, reload }) {
     setManagers: setManagers,
     customers: customers,
     showUndo: showUndo,
+    onClose: () => setPanel(null)
+  }), panel === "custSettings" && /*#__PURE__*/React.createElement(CustomerSettingsPanel, {
+    customers: customers,
+    setCustomers: setCustomers,
+    colorOf: colorOf,
     onClose: () => setPanel(null)
   }), panel === "leave" && /*#__PURE__*/React.createElement(LeavePanel, {
     managerNames: managerNames,
@@ -1445,6 +1585,7 @@ const MODE_LABEL = {
   w: "반복 요일",
   daily: "매일",
   md: "매월 특정일",
+  nd: "N일 간격",
   wr: "주리포트 연동",
   manual: "수동설정"
 };
@@ -1460,7 +1601,7 @@ function AddStepRow({ onAdd }) {
     const nm = name.trim();
     if (!nm) return;
     let a;
-    if (mode === "d") a = Number(arg) || 0;else if (mode === "w") a = wdays.length ? wdays : [1];else if (mode === "md") a = mdays.split(",").map(x => parseInt(x.trim(), 10)).filter(x => x >= 1 && x <= 31);else a = undefined;
+    if (mode === "d") a = Number(arg) || 0;else if (mode === "w") a = wdays.length ? wdays : [1];else if (mode === "md") a = mdays.split(",").map(x => parseInt(x.trim(), 10)).filter(x => x >= 1 && x <= 31);else if (mode === "nd") a = Math.max(1, Number(arg) || 28);else a = undefined;
     onAdd({ name: nm, mode, arg: a });
     setName("");
     setMode("d");
@@ -1487,12 +1628,20 @@ function AddStepRow({ onAdd }) {
     value: mode,
     onChange: e => setMode(e.target.value),
     className: "text-xs border border-neutral-300 rounded px-2 py-1 bg-white"
-  }, /*#__PURE__*/React.createElement("option", { value: "d" }, "디데이(D±N)"), /*#__PURE__*/React.createElement("option", { value: "w" }, "반복 요일"), /*#__PURE__*/React.createElement("option", { value: "daily" }, "매일"), /*#__PURE__*/React.createElement("option", { value: "md" }, "매월 특정일"), /*#__PURE__*/React.createElement("option", { value: "wr" }, "주리포트 연동")), mode === "d" && /*#__PURE__*/React.createElement("input", {
+  }, /*#__PURE__*/React.createElement("option", { value: "d" }, "디데이(D±N)"), /*#__PURE__*/React.createElement("option", { value: "w" }, "반복 요일"), /*#__PURE__*/React.createElement("option", { value: "daily" }, "매일"), /*#__PURE__*/React.createElement("option", { value: "md" }, "매월 특정일"), /*#__PURE__*/React.createElement("option", { value: "nd" }, "N일 간격"), /*#__PURE__*/React.createElement("option", { value: "wr" }, "주리포트 연동")), mode === "d" && /*#__PURE__*/React.createElement("input", {
     type: "number",
     value: arg,
     onChange: e => setArg(e.target.value),
     className: "w-16 border border-neutral-300 rounded px-2 py-1 text-sm text-center"
-  }), mode === "w" && /*#__PURE__*/React.createElement("div", {
+  }), mode === "nd" && /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-1"
+  }, /*#__PURE__*/React.createElement("span", { className: "text-xs" }, "매"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: 1,
+    value: arg || 28,
+    onChange: e => setArg(e.target.value),
+    className: "w-16 border border-neutral-300 rounded px-2 py-1 text-sm text-center"
+  }), /*#__PURE__*/React.createElement("span", { className: "text-xs text-neutral-400" }, "일 간격")), mode === "w" && /*#__PURE__*/React.createElement("div", {
     className: "flex gap-1"
   }, [1, 2, 3, 4, 5].map(w => /*#__PURE__*/React.createElement("button", {
     key: w,
@@ -1526,10 +1675,13 @@ function StepEditor({
   const isCustom = !!override;
   const eff = override || baseStep; // 현재 유효 방식/값
   const mode = eff.mode;
+  // 매월 특정일 입력은 편집 중 원시 문자열을 보관해야 쉼표가 사라지지 않음(#12)
+  const [mdText, setMdText] = useState(null);
   const applyMode = newMode => {
     // 방식 전환 시 기본 인자 채워주기
     let arg;
-    if (newMode === "d") arg = typeof baseStep.arg === "number" ? baseStep.arg : 0;else if (newMode === "w") arg = Array.isArray(baseStep.arg) ? baseStep.arg : [1];else if (newMode === "md") arg = Array.isArray(baseStep.arg) ? baseStep.arg : [1];else arg = undefined;
+    if (newMode === "d") arg = typeof baseStep.arg === "number" ? baseStep.arg : 0;else if (newMode === "w") arg = Array.isArray(baseStep.arg) ? baseStep.arg : [1];else if (newMode === "md") arg = Array.isArray(baseStep.arg) ? baseStep.arg : [1];else if (newMode === "nd") arg = typeof baseStep.arg === "number" ? baseStep.arg : 28;else arg = undefined;
+    setMdText(null);
     setStep(key, {
       mode: newMode,
       arg
@@ -1571,6 +1723,8 @@ function StepEditor({
   }, "매일"), /*#__PURE__*/React.createElement("option", {
     value: "md"
   }, "매월 특정일"), /*#__PURE__*/React.createElement("option", {
+    value: "nd"
+  }, "N일 간격"), /*#__PURE__*/React.createElement("option", {
     value: "wr"
   }, "주리포트 연동")), mode === "d" && /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-1"
@@ -1600,13 +1754,31 @@ function StepEditor({
     className: "text-xs"
   }, "매월"), /*#__PURE__*/React.createElement("input", {
     type: "text",
-    value: (Array.isArray(eff.arg) ? eff.arg : []).join(","),
-    onChange: e => setArg(e.target.value.split(",").map(x => parseInt(x.trim(), 10)).filter(x => x >= 1 && x <= 31)),
+    // 편집 중엔 원시 문자열(mdText)을 보여줘 쉼표가 지워지지 않게 하고, 포커스 해제 때 파싱해 저장(#12)
+    value: mdText !== null ? mdText : (Array.isArray(eff.arg) ? eff.arg : []).join(","),
+    onChange: e => setMdText(e.target.value),
+    onBlur: () => {
+      if (mdText === null) return;
+      setArg(mdText.split(",").map(x => parseInt(x.trim(), 10)).filter(x => x >= 1 && x <= 31));
+      setMdText(null);
+    },
     placeholder: "예: 1,15",
     className: "w-24 border border-neutral-300 rounded px-2 py-1 text-sm text-center"
   }), /*#__PURE__*/React.createElement("span", {
     className: "text-xs text-neutral-400"
-  }, "일 (쉼표 구분)")), mode === "daily" && /*#__PURE__*/React.createElement("span", {
+  }, "일 (쉼표 구분)")), mode === "nd" && /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-1"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-xs"
+  }, "매"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: 1,
+    value: typeof eff.arg === "number" ? eff.arg : 28,
+    onChange: e => setArg(Math.max(1, Number(e.target.value) || 1)),
+    className: "w-16 border border-neutral-300 rounded px-2 py-1 text-sm text-center"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-neutral-400"
+  }, "일 간격 (등록일 기준 · 28=4주)")), mode === "daily" && /*#__PURE__*/React.createElement("span", {
     className: "text-xs text-neutral-500"
   }, "매 영업일마다 자동 생성"), mode === "wr" && /*#__PURE__*/React.createElement("span", {
     className: "text-xs text-neutral-500"
@@ -1616,11 +1788,13 @@ function TaskDetail({
   task,
   onClose,
   onChange,
+  onEditPersonal,
   onReset,
   onDelete
 }) {
+  const canEdit = task.personal && onEditPersonal;
   return /*#__PURE__*/React.createElement("div", {
-    className: "fixed bottom-4 right-4 w-80 bg-white rounded-xl shadow-xl border border-neutral-200 p-4 z-40"
+    className: "fixed bottom-4 right-4 w-80 bg-white rounded-xl shadow-xl border border-neutral-200 p-4 z-40 max-h-[85vh] overflow-y-auto"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-start justify-between"
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
@@ -1638,7 +1812,16 @@ function TaskDetail({
     className: "text-xs text-pink-600 mt-1"
   }, "담당자 연차일이지만 리포트는 유지됩니다."), /*#__PURE__*/React.createElement("div", {
     className: "mt-3 space-y-2"
-  }, /*#__PURE__*/React.createElement("label", {
+  },
+  // 개인업무: 내용 수정 (#17)
+  canEdit && /*#__PURE__*/React.createElement("label", {
+    className: "block text-xs font-semibold text-neutral-600"
+  }, "업무 내용 수정", /*#__PURE__*/React.createElement("input", {
+    value: task.srcTitle != null ? task.srcTitle : task.step,
+    onChange: e => onEditPersonal({ title: e.target.value }),
+    className: "mt-1 w-full border border-neutral-300 rounded-lg px-2 py-1 text-sm"
+  })),
+  /*#__PURE__*/React.createElement("label", {
     className: "block text-xs font-semibold text-neutral-600"
   }, "날짜 직접 수정 (개인별 조정)", /*#__PURE__*/React.createElement("input", {
     type: "date",
@@ -1647,7 +1830,35 @@ function TaskDetail({
       date: e.target.value
     }),
     className: "mt-1 w-full border border-neutral-300 rounded-lg px-2 py-1 text-sm"
-  })), /*#__PURE__*/React.createElement("label", {
+  })),
+  // 개인업무: 반복 규칙 수정 (#6)
+  canEdit && /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-2"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "block text-xs font-semibold text-neutral-600"
+  }, "반복", /*#__PURE__*/React.createElement("select", {
+    value: task.srcRepeat || "none",
+    onChange: e => onEditPersonal({ repeat: e.target.value === "none" ? null : e.target.value }),
+    className: "mt-1 w-full border border-neutral-300 rounded-lg px-2 py-1 text-sm bg-white"
+  }, /*#__PURE__*/React.createElement("option", { value: "none" }, "안 함"), /*#__PURE__*/React.createElement("option", { value: "weekly" }, "매주"), /*#__PURE__*/React.createElement("option", { value: "monthly" }, "매달"))), task.srcRepeat && task.srcRepeat !== "none" && /*#__PURE__*/React.createElement("label", {
+    className: "block text-xs font-semibold text-neutral-600"
+  }, "종료일", /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: task.srcRepeatUntil || "",
+    onChange: e => onEditPersonal({ repeatUntil: e.target.value || null }),
+    className: "mt-1 w-full border border-neutral-300 rounded-lg px-2 py-1 text-sm"
+  }))),
+  // 비고/메모 (#13) — 개인업무는 원본에, 자동업무는 개인별 조정에 저장
+  /*#__PURE__*/React.createElement("label", {
+    className: "block text-xs font-semibold text-neutral-600"
+  }, "비고 / 메모", /*#__PURE__*/React.createElement("textarea", {
+    value: canEdit ? (task.srcMemo || "") : (task.memo || ""),
+    onChange: e => canEdit ? onEditPersonal({ memo: e.target.value || null }) : onChange({ memo: e.target.value || null }),
+    rows: 2,
+    placeholder: "세부 내용 · 참고사항",
+    className: "mt-1 w-full border border-neutral-300 rounded-lg px-2 py-1 text-sm resize-y"
+  })),
+  /*#__PURE__*/React.createElement("label", {
     className: "flex items-center gap-2 text-sm"
   }, /*#__PURE__*/React.createElement("input", {
     type: "checkbox",
@@ -1663,68 +1874,100 @@ function TaskDetail({
   }, "자동 배치 상태로 되돌리기") : /*#__PURE__*/React.createElement("span", null), onDelete && /*#__PURE__*/React.createElement("button", {
     onClick: onDelete,
     className: "text-xs text-rose-600 hover:underline font-semibold"
-  }, "개인업무 삭제"))));
+  }, task.repeatSrc ? "반복 일정 전체 삭제" : "개인업무 삭제"))));
 }
 function AddTaskPanel({
   target,
   managers,
+  customers,
+  defaultManager,
   onClose,
   onSave
 }) {
   // target: 문자열(날짜) 또는 {date, customerId, customerName, manager}
   const isObj = typeof target === "object";
-  const [title, setTitle] = useState("");
+  const lockCustomer = isObj; // 고객사별 주간에서 열면 고객사 고정
+  const [text, setText] = useState("");
   const [date, setDate] = useState(isObj ? target.date : target);
-  const [manager, setManager] = useState(isObj ? target.manager : managers[0]);
+  const [manager, setManager] = useState(isObj ? target.manager : (defaultManager || managers[0]));
+  const [customerId, setCustomerId] = useState(isObj ? (target.customerId || "") : "");
+  const [memo, setMemo] = useState("");
+  const [repeat, setRepeat] = useState("none");
+  const [repeatUntil, setRepeatUntil] = useState("");
+  const titles = text.split("\n").map(s => s.trim()).filter(Boolean);
+  const label = { none: "반복 안 함(1회성)", weekly: "매주 반복", monthly: "매달 반복" };
+  const submit = () => {
+    if (titles.length === 0) return;
+    const allMg = manager === "__all__" ? managers : [manager];
+    const cust = customers.find(c => c.id === customerId);
+    const stamp = Date.now();
+    const rows = [];
+    let k = 0;
+    allMg.forEach(mg => titles.forEach(tt => {
+      rows.push({
+        id: `pt${stamp}_${k++}`,
+        date,
+        title: tt,
+        manager: mg,
+        customerId: customerId || null,
+        customerName: cust ? cust.name : (isObj ? target.customerName : null),
+        done: false,
+        memo: memo.trim() || null,
+        repeat: repeat === "none" ? null : repeat,
+        repeatUntil: repeat === "none" ? null : (repeatUntil || null)
+      });
+    }));
+    onSave(rows);
+  };
+  const field = (labelText, node) => /*#__PURE__*/React.createElement("label", { className: "block text-sm" }, /*#__PURE__*/React.createElement("span", { className: "text-xs font-semibold text-neutral-600" }, labelText), node);
   return /*#__PURE__*/React.createElement(Overlay, {
-    title: `개인업무 추가 · ${date}`,
+    title: `일정 추가 · ${date}`,
     onClose: onClose
   }, /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-neutral-500 mb-3"
-  }, "자동 배치되는 상품 업무 외에, 이 날짜에 직접 업무를 추가합니다.", isObj ? ` (${target.customerName} 행에 표시)` : " 캘린더에 개인업무로 표시돼요."), /*#__PURE__*/React.createElement("div", {
+  }, "자동 배치되는 상품 업무 외에 직접 업무를 추가합니다. 여러 줄을 입력하면 한 번에 여러 개가 추가돼요.", isObj ? ` (${target.customerName} 행에 표시)` : ""), /*#__PURE__*/React.createElement("div", {
     className: "space-y-3"
-  }, /*#__PURE__*/React.createElement("label", {
-    className: "block text-sm"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "text-xs font-semibold text-neutral-600"
-  }, "날짜"), /*#__PURE__*/React.createElement("input", {
+  }, /*#__PURE__*/React.createElement("div", { className: "grid grid-cols-2 gap-3" }, field("날짜", /*#__PURE__*/React.createElement("input", {
     type: "date",
     value: date,
     onChange: e => setDate(e.target.value),
     className: "mt-1 w-full border border-neutral-300 rounded-lg px-3 py-2 bg-white"
-  })), /*#__PURE__*/React.createElement("label", {
-    className: "block text-sm"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "text-xs font-semibold text-neutral-600"
-  }, "업무 내용"), /*#__PURE__*/React.createElement("input", {
-    value: title,
-    onChange: e => setTitle(e.target.value),
-    autoFocus: true,
-    placeholder: "예: 원장님 미팅 / 급한 원고 수정",
-    className: "mt-1 w-full border border-neutral-300 rounded-lg px-3 py-2"
-  })), !isObj && /*#__PURE__*/React.createElement("label", {
-    className: "block text-sm"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "text-xs font-semibold text-neutral-600"
-  }, "담당자"), /*#__PURE__*/React.createElement("select", {
+  })), field("담당자", /*#__PURE__*/React.createElement("select", {
     value: manager,
     onChange: e => setManager(e.target.value),
     className: "mt-1 w-full border border-neutral-300 rounded-lg px-3 py-2 bg-white"
-  }, managers.map(mg => /*#__PURE__*/React.createElement("option", {
-    key: mg
-  }, mg)))), /*#__PURE__*/React.createElement("button", {
-    disabled: !title.trim(),
-    onClick: () => onSave({
-      id: `pt${Date.now()}`,
-      date,
-      title: title.trim(),
-      manager,
-      customerId: isObj ? target.customerId : null,
-      customerName: isObj ? target.customerName : null,
-      done: false
-    }),
+  }, managers.map(mg => /*#__PURE__*/React.createElement("option", { key: mg, value: mg }, mg)), /*#__PURE__*/React.createElement("option", { value: "__all__" }, "★ 모두에게 (전 담당자)")))), field("업무 내용 (여러 줄 = 여러 개)", /*#__PURE__*/React.createElement("textarea", {
+    value: text,
+    onChange: e => setText(e.target.value),
+    autoFocus: true,
+    rows: 3,
+    placeholder: "예: 원장님 미팅\n급한 원고 수정\n리뷰 정리",
+    className: "mt-1 w-full border border-neutral-300 rounded-lg px-3 py-2 resize-y"
+  })), field("고객사 (선택 · 고객사별 주간에도 표시됨)", /*#__PURE__*/React.createElement("select", {
+    value: customerId,
+    disabled: lockCustomer,
+    onChange: e => setCustomerId(e.target.value),
+    className: "mt-1 w-full border border-neutral-300 rounded-lg px-3 py-2 bg-white disabled:bg-neutral-100"
+  }, /*#__PURE__*/React.createElement("option", { value: "" }, "없음 (개인업무)"), customers.map(c => /*#__PURE__*/React.createElement("option", { key: c.id, value: c.id }, c.name)))), field("비고 / 메모 (선택)", /*#__PURE__*/React.createElement("textarea", {
+    value: memo,
+    onChange: e => setMemo(e.target.value),
+    rows: 2,
+    placeholder: "세부 내용 · 참고사항",
+    className: "mt-1 w-full border border-neutral-300 rounded-lg px-3 py-2 resize-y"
+  })), /*#__PURE__*/React.createElement("div", { className: "grid grid-cols-2 gap-3" }, field("반복", /*#__PURE__*/React.createElement("select", {
+    value: repeat,
+    onChange: e => setRepeat(e.target.value),
+    className: "mt-1 w-full border border-neutral-300 rounded-lg px-3 py-2 bg-white"
+  }, /*#__PURE__*/React.createElement("option", { value: "none" }, label.none), /*#__PURE__*/React.createElement("option", { value: "weekly" }, label.weekly), /*#__PURE__*/React.createElement("option", { value: "monthly" }, label.monthly))), repeat !== "none" && field("반복 종료일 (비우면 6개월)", /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: repeatUntil,
+    onChange: e => setRepeatUntil(e.target.value),
+    className: "mt-1 w-full border border-neutral-300 rounded-lg px-3 py-2 bg-white"
+  }))), /*#__PURE__*/React.createElement("button", {
+    disabled: titles.length === 0,
+    onClick: submit,
     className: "w-full py-3 rounded-lg bg-emerald-700 text-white font-bold disabled:opacity-40 hover:bg-emerald-800"
-  }, "추가")));
+  }, manager === "__all__" ? `${managers.length}명에게 ${titles.length || ""}개 추가` : titles.length > 1 ? `${titles.length}개 추가` : "추가")));
 }
 function RegisterPanel({
   managerNames,
@@ -1784,7 +2027,7 @@ function RegisterPanel({
     onChange: e => setMonthlyReportDate(Number(e.target.value)),
     className: "mt-1 w-full border border-neutral-300 rounded-lg px-3 py-2 bg-white"
   }, Array.from({
-    length: 28
+    length: 31
   }, (_, i) => i + 1).map(d => /*#__PURE__*/React.createElement("option", {
     key: d,
     value: d
@@ -2036,6 +2279,96 @@ function ManagersPanel({
     className: "text-neutral-400 hover:text-rose-600 text-xs"
   }, "삭제")))));
 }
+// 고객사 기본설정 전용 패널: 검색 · 이름변경(#20) · 순서변경(#16) · 리포트일/등록일 수정(#14) · 리포트 on/off(#3)
+function CustomerSettingsPanel({
+  customers,
+  setCustomers,
+  colorOf,
+  onClose
+}) {
+  const [q, setQ] = useState("");
+  const kw = q.trim().toLowerCase();
+  const list = kw ? customers.filter(c => c.name.toLowerCase().includes(kw)) : customers;
+  const patch = (id, p) => setCustomers(cs => cs.map(x => x.id === id ? { ...x, ...p } : x));
+  const move = (id, dir) => setCustomers(cs => {
+    const arr = cs.slice();
+    const i = arr.findIndex(x => x.id === id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= arr.length) return cs;
+    const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+    return arr.map((c, k) => ({ ...c, ord: k }));
+  });
+  const days = Array.from({ length: 31 }, (_, k) => k + 1);
+  const cell = (labelText, node) => /*#__PURE__*/React.createElement("label", { className: "text-xs text-neutral-600" }, /*#__PURE__*/React.createElement("span", { className: "block font-semibold mb-px" }, labelText), node);
+  return /*#__PURE__*/React.createElement(Overlay, {
+    title: "고객사 설정 · 기본값 일괄 관리",
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-neutral-500 mb-3"
+  }, "이름·등록일·리포트 날짜를 한곳에서 수정하고 표시 순서를 바꿀 수 있어요. (변경 시 업무가 자동 재배치됩니다)"), /*#__PURE__*/React.createElement("input", {
+    value: q,
+    onChange: e => setQ(e.target.value),
+    placeholder: "🔍 고객사 검색",
+    className: "w-full border border-neutral-300 rounded-lg px-3 py-2 text-sm mb-3"
+  }), kw && /*#__PURE__*/React.createElement("p", { className: "text-xs text-neutral-400 mb-2" }, "검색 중에는 순서 변경이 비활성화됩니다."), /*#__PURE__*/React.createElement("div", {
+    className: "space-y-2"
+  }, list.length === 0 && /*#__PURE__*/React.createElement("p", { className: "text-sm text-neutral-400" }, "일치하는 고객사가 없습니다."), list.map((c) => {
+    const fullIdx = customers.findIndex(x => x.id === c.id);
+    return /*#__PURE__*/React.createElement("div", {
+      key: c.id,
+      className: "border border-neutral-200 rounded-lg p-3"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "flex items-center gap-2 mb-2"
+    }, /*#__PURE__*/React.createElement("span", {
+      className: `text-xs text-white px-2 py-px rounded-full shrink-0 ${colorOf(c.manager)}`
+    }, c.manager), /*#__PURE__*/React.createElement("input", {
+      value: c.name,
+      onChange: e => patch(c.id, { name: e.target.value }),
+      className: "flex-1 border border-neutral-300 rounded px-2 py-1 text-sm font-semibold"
+    }), !kw && /*#__PURE__*/React.createElement("div", {
+      className: "flex flex-col leading-none shrink-0"
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => move(c.id, -1),
+      disabled: fullIdx === 0,
+      title: "위로",
+      className: "text-neutral-400 hover:text-neutral-800 disabled:opacity-20 text-xs"
+    }, "▲"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => move(c.id, 1),
+      disabled: fullIdx === customers.length - 1,
+      title: "아래로",
+      className: "text-neutral-400 hover:text-neutral-800 disabled:opacity-20 text-xs"
+    }, "▼"))), /*#__PURE__*/React.createElement("div", {
+      className: "grid grid-cols-3 gap-2"
+    }, cell("등록일(시작일)", /*#__PURE__*/React.createElement("input", {
+      type: "date",
+      value: c.regDate,
+      onChange: e => patch(c.id, { regDate: e.target.value }),
+      className: "w-full border border-neutral-300 rounded px-1 py-1 text-xs bg-white"
+    })), cell("주리포트 요일", /*#__PURE__*/React.createElement("select", {
+      value: c.weeklyReportDay,
+      onChange: e => patch(c.id, { weeklyReportDay: Number(e.target.value) }),
+      className: "w-full border border-neutral-300 rounded px-1 py-1 text-xs bg-white"
+    }, [1, 2, 3, 4, 5].map(w => /*#__PURE__*/React.createElement("option", { key: w, value: w }, WEEKDAYS[w], "요일")))), cell("월리포트 날짜", /*#__PURE__*/React.createElement("select", {
+      value: c.monthlyReportDate,
+      onChange: e => patch(c.id, { monthlyReportDate: Number(e.target.value) }),
+      className: "w-full border border-neutral-300 rounded px-1 py-1 text-xs bg-white"
+    }, days.map(d => /*#__PURE__*/React.createElement("option", { key: d, value: d }, d, "일"))))), /*#__PURE__*/React.createElement("div", {
+      className: "flex items-center gap-4 mt-2"
+    }, /*#__PURE__*/React.createElement("label", {
+      className: "flex items-center gap-1 text-xs text-neutral-600"
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: !c.noWeekly,
+      onChange: e => patch(c.id, { noWeekly: !e.target.checked })
+    }), "주리포트 생성"), /*#__PURE__*/React.createElement("label", {
+      className: "flex items-center gap-1 text-xs text-neutral-600"
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: !c.noMonthly,
+      onChange: e => patch(c.id, { noMonthly: !e.target.checked })
+    }), "월리포트 생성")));
+  })));
+}
 function Overlay({
   title,
   children,
@@ -2070,10 +2403,13 @@ const SEED_DOC = {
   managers: DEFAULT_MANAGERS,
   stepDisabled: {},
   stepExtras: {},
-  taskOrder: {}
+  taskOrder: {},
+  productQty: {}
 };
+// 고객사를 표시순서(ord)대로 정렬. ord 가 같으면 기존 배열 순서 유지(안정 정렬)
+const sortByOrd = arr => (arr || []).map((c, i) => ({ ...c, ord: c.ord ?? i })).sort((a, b) => (a.ord - b.ord) || 0);
 const pickDoc = res => ({
-  customers: res.customers || [],
+  customers: sortByOrd(res.customers || []),
   leaves: res.leaves || [],
   holidays: res.holidays || [],
   overrides: res.overrides || {},
@@ -2083,7 +2419,8 @@ const pickDoc = res => ({
   managers: res.managers && res.managers.length ? res.managers : DEFAULT_MANAGERS,
   stepDisabled: res.stepDisabled || {},
   stepExtras: res.stepExtras || {},
-  taskOrder: res.taskOrder || {}
+  taskOrder: res.taskOrder || {},
+  productQty: res.productQty || {}
 });
 // 행 단위 변경 전송
 function sendOps(ops, keepalive) {

@@ -50,11 +50,12 @@ export async function GET() {
       return [];
     }
   };
-  const [mg, sd, se, tord] = await Promise.all([
+  const [mg, sd, se, tord, pq] = await Promise.all([
     safe(selectAll(sb, "managers", "ord")),
     safe(selectAll(sb, "step_disabled")),
     safe(selectAll(sb, "step_extras")),
     safe(selectAll(sb, "task_order")),
+    safe(selectAll(sb, "product_qty")),
   ]);
 
   // 날짜 값을 항상 "YYYY-MM-DD" 로 정규화 (컬럼이 timestamp/timestamptz 로 돼있어도
@@ -69,6 +70,9 @@ export async function GET() {
     products: r.products || [],
     weeklyReportDay: r.weekly_report_day,
     monthlyReportDate: r.monthly_report_date,
+    ord: r.ord ?? 0,
+    noWeekly: r.no_weekly ?? false,
+    noMonthly: r.no_monthly ?? false,
     ...(r.mr_overrides && Object.keys(r.mr_overrides).length
       ? { mrOverrides: r.mr_overrides }
       : {}),
@@ -83,12 +87,16 @@ export async function GET() {
     customerId: r.customer_id,
     customerName: r.customer_name,
     done: r.done,
+    ...(r.memo ? { memo: r.memo } : {}),
+    ...(r.repeat ? { repeat: r.repeat } : {}),
+    ...(r.repeat_until ? { repeatUntil: ymd(r.repeat_until) } : {}),
   }));
   const overrides: Record<string, any> = {};
   (to.data || []).forEach((r: any) => {
     const o: any = {};
     if (r.date != null) o.date = ymd(r.date);
     if (r.done != null) o.done = r.done;
+    if (r.memo != null) o.memo = r.memo;
     overrides[r.task_id] = o;
   });
   const managerSteps: Record<string, any> = {};
@@ -109,6 +117,10 @@ export async function GET() {
   (tord as any[]).forEach((r) => {
     taskOrder[r.task_id] = r.ord;
   });
+  const productQty: Record<string, number> = {};
+  (pq as any[]).forEach((r) => {
+    productQty[r.key] = r.qty;
+  });
 
   return NextResponse.json({
     configured: true,
@@ -122,6 +134,7 @@ export async function GET() {
     stepDisabled,
     stepExtras,
     taskOrder,
+    productQty,
   });
 }
 
@@ -132,7 +145,7 @@ export async function PUT(req: Request) {
 
   const doc = await req.json();
 
-  const customers = (doc.customers || []).map((x: any) => ({
+  const customers = (doc.customers || []).map((x: any, i: number) => ({
     id: x.id,
     name: x.name,
     manager: x.manager,
@@ -141,6 +154,9 @@ export async function PUT(req: Request) {
     monthly_report_date: x.monthlyReportDate,
     products: x.products || [],
     mr_overrides: x.mrOverrides || {},
+    ord: x.ord ?? i,
+    no_weekly: !!x.noWeekly,
+    no_monthly: !!x.noMonthly,
   }));
   const leaves = (doc.leaves || []).map((x: any) => ({ manager: x.manager, date: x.date }));
   const holidays = (doc.holidays || []).map((t: any) => ({ date: t[0], name: t[1] }));
@@ -152,14 +168,18 @@ export async function PUT(req: Request) {
     customer_id: x.customerId ?? null,
     customer_name: x.customerName ?? null,
     done: !!x.done,
+    memo: x.memo ?? null,
+    repeat: x.repeat ?? null,
+    repeat_until: x.repeatUntil ?? null,
   }));
   const taskOverrides = Object.entries(doc.overrides || {})
     .map(([task_id, v]: [string, any]) => ({
       task_id,
       date: v?.date ?? null,
       done: v?.done ?? null,
+      memo: v?.memo ?? null,
     }))
-    .filter((r) => r.date != null || r.done != null);
+    .filter((r) => r.date != null || r.done != null || r.memo != null);
   const stepOverrides = Object.entries(doc.managerSteps || {}).map(
     ([key, v]: [string, any]) => ({ key, mode: v.mode, arg: v.arg ?? null })
   );
@@ -179,6 +199,9 @@ export async function PUT(req: Request) {
   const taskOrder = Object.entries(doc.taskOrder || {}).map(
     ([task_id, ord]: [string, any]) => ({ task_id, ord })
   );
+  const productQty = Object.entries(doc.productQty || {})
+    .filter(([, v]: [string, any]) => Number(v) > 0)
+    .map(([key, v]: [string, any]) => ({ key, qty: Number(v) }));
 
   // 기존 테이블: 오류 시 실패(hard)
   const core: Array<[string, any[], string]> = [
@@ -208,6 +231,7 @@ export async function PUT(req: Request) {
     ["step_disabled", stepDisabled, "key"],
     ["step_extras", stepExtras, "key"],
     ["task_order", taskOrder, "task_id"],
+    ["product_qty", productQty, "key"],
   ];
   for (const [table, rows, pk] of extra) {
     try {
