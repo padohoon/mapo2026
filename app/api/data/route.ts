@@ -58,6 +58,17 @@ export async function GET() {
     safe(selectAll(sb, "product_qty")),
   ]);
 
+  // 마이그레이션 003 반영 여부 프로브: customers.ord 컬럼과 product_qty 테이블이 실제로 존재하는지 확인.
+  // 프론트는 이 값으로 "새 컬럼 전송 여부"를 결정 → 마이그레이션 전에도 기존 기능이 안전하게 저장됨.
+  const probe = async (q: any) => {
+    try { const r = await q; return !r.error; } catch { return false; }
+  };
+  const [hasOrd, hasQtyTable] = await Promise.all([
+    probe(sb.from("customers").select("ord").limit(1)),
+    probe(sb.from("product_qty").select("key").limit(1)),
+  ]);
+  const migrationDone = hasOrd && hasQtyTable;
+
   // 날짜 값을 항상 "YYYY-MM-DD" 로 정규화 (컬럼이 timestamp/timestamptz 로 돼있어도
   // 프론트가 쓰는 날짜 문자열과 형식이 어긋나 드래그 이동이 사라지던 문제 방지)
   const ymd = (v: any) => (v == null ? v : String(v).slice(0, 10));
@@ -124,6 +135,7 @@ export async function GET() {
 
   return NextResponse.json({
     configured: true,
+    migrationDone,
     customers,
     leaves,
     holidays,
@@ -145,40 +157,46 @@ export async function PUT(req: Request) {
 
   const doc = await req.json();
 
-  const customers = (doc.customers || []).map((x: any, i: number) => ({
-    id: x.id,
-    name: x.name,
-    manager: x.manager,
-    reg_date: x.regDate,
-    weekly_report_day: x.weeklyReportDay,
-    monthly_report_date: x.monthlyReportDate,
-    products: x.products || [],
-    mr_overrides: x.mrOverrides || {},
-    ord: x.ord ?? i,
-    no_weekly: !!x.noWeekly,
-    no_monthly: !!x.noMonthly,
-  }));
+  // 신규 컬럼(003)은 기본값이 아닐 때만 포함 → 마이그레이션 전 스냅샷 저장도 실패하지 않음
+  const customers = (doc.customers || []).map((x: any, i: number) => {
+    const r: any = {
+      id: x.id,
+      name: x.name,
+      manager: x.manager,
+      reg_date: x.regDate,
+      weekly_report_day: x.weeklyReportDay,
+      monthly_report_date: x.monthlyReportDate,
+      products: x.products || [],
+      mr_overrides: x.mrOverrides || {},
+    };
+    if (x.ord != null && x.ord !== 0) r.ord = x.ord; else if (i > 0) r.ord = i;
+    if (x.noWeekly) r.no_weekly = true;
+    if (x.noMonthly) r.no_monthly = true;
+    return r;
+  });
   const leaves = (doc.leaves || []).map((x: any) => ({ manager: x.manager, date: x.date }));
   const holidays = (doc.holidays || []).map((t: any) => ({ date: t[0], name: t[1] }));
-  const personalTasks = (doc.personalTasks || []).map((x: any) => ({
-    id: x.id,
-    date: x.date,
-    title: x.title,
-    manager: x.manager,
-    customer_id: x.customerId ?? null,
-    customer_name: x.customerName ?? null,
-    done: !!x.done,
-    memo: x.memo ?? null,
-    repeat: x.repeat ?? null,
-    repeat_until: x.repeatUntil ?? null,
-  }));
+  const personalTasks = (doc.personalTasks || []).map((x: any) => {
+    const r: any = {
+      id: x.id,
+      date: x.date,
+      title: x.title,
+      manager: x.manager,
+      customer_id: x.customerId ?? null,
+      customer_name: x.customerName ?? null,
+      done: !!x.done,
+    };
+    if (x.memo != null) r.memo = x.memo;
+    if (x.repeat != null) r.repeat = x.repeat;
+    if (x.repeatUntil != null) r.repeat_until = x.repeatUntil;
+    return r;
+  });
   const taskOverrides = Object.entries(doc.overrides || {})
-    .map(([task_id, v]: [string, any]) => ({
-      task_id,
-      date: v?.date ?? null,
-      done: v?.done ?? null,
-      memo: v?.memo ?? null,
-    }))
+    .map(([task_id, v]: [string, any]) => {
+      const r: any = { task_id, date: v?.date ?? null, done: v?.done ?? null };
+      if (v?.memo != null) r.memo = v.memo;
+      return r;
+    })
     .filter((r) => r.date != null || r.done != null || r.memo != null);
   const stepOverrides = Object.entries(doc.managerSteps || {}).map(
     ([key, v]: [string, any]) => ({ key, mode: v.mode, arg: v.arg ?? null })
@@ -212,14 +230,19 @@ export async function PUT(req: Request) {
     ["task_overrides", taskOverrides, "task_id"],
     ["step_overrides", stepOverrides, "key"],
   ];
+  // 스키마 미반영(마이그레이션 전) 오류는 하드 실패로 보지 않는다 (신규 컬럼/테이블 없음)
+  const schemaMissing = (msg: string) => {
+    const m = (msg || "").toLowerCase();
+    return m.includes("schema cache") || m.includes("does not exist") || m.includes("could not find") || m.includes("column");
+  };
   for (const [table, rows, pk] of core) {
     const del = await sb.from(table).delete().not(pk, "is", null);
-    if (del.error) {
+    if (del.error && !schemaMissing(del.error.message)) {
       return NextResponse.json({ ok: false, error: `${table}: ${del.error.message}` }, { status: 500 });
     }
     if (rows.length) {
       const ins = await sb.from(table).insert(rows);
-      if (ins.error) {
+      if (ins.error && !schemaMissing(ins.error.message)) {
         return NextResponse.json({ ok: false, error: `${table}: ${ins.error.message}` }, { status: 500 });
       }
     }

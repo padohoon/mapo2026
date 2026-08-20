@@ -150,8 +150,37 @@ const mondayOf = d => {
 
 // ---------- 행 단위 diff (동시 편집 안전 저장용) ----------
 // 이전 동기화본(prev)과 현재 상태(cur)를 비교해 바뀐 행만 ops 로 만든다.
-const customerRow = c => ({ id: c.id, name: c.name, manager: c.manager, reg_date: c.regDate, weekly_report_day: c.weeklyReportDay, monthly_report_date: c.monthlyReportDate, products: c.products || [], mr_overrides: c.mrOverrides || {}, ord: c.ord ?? 0, no_weekly: !!c.noWeekly, no_monthly: !!c.noMonthly });
-const personalRow = pt => ({ id: pt.id, date: pt.date, title: pt.title, manager: pt.manager, customer_id: pt.customerId ?? null, customer_name: pt.customerName ?? null, done: !!pt.done, memo: pt.memo ?? null, repeat: pt.repeat ?? null, repeat_until: pt.repeatUntil ?? null });
+// 마이그레이션 003 반영 여부(신규 컬럼/테이블 존재). GET /api/data 의 migrationDone 으로 설정.
+// - true(반영 완료): 신규 컬럼을 항상 전송 → 순서변경/플래그 해제/메모 삭제까지 정확히 저장.
+// - false(반영 전): 신규 컬럼은 "값이 있을 때만" 전송 → 없는 컬럼을 건드리지 않아 기존 기능 저장이 실패하지 않음.
+let SCHEMA_READY = true;
+function setSchemaReady(v) { SCHEMA_READY = !!v; }
+const customerRow = c => {
+  const r = { id: c.id, name: c.name, manager: c.manager, reg_date: c.regDate, weekly_report_day: c.weeklyReportDay, monthly_report_date: c.monthlyReportDate, products: c.products || [], mr_overrides: c.mrOverrides || {} };
+  if (SCHEMA_READY) {
+    r.ord = c.ord ?? 0;
+    r.no_weekly = !!c.noWeekly;
+    r.no_monthly = !!c.noMonthly;
+  } else {
+    if (c.ord != null && c.ord !== 0) r.ord = c.ord;
+    if (c.noWeekly) r.no_weekly = true;
+    if (c.noMonthly) r.no_monthly = true;
+  }
+  return r;
+};
+const personalRow = pt => {
+  const r = { id: pt.id, date: pt.date, title: pt.title, manager: pt.manager, customer_id: pt.customerId ?? null, customer_name: pt.customerName ?? null, done: !!pt.done };
+  if (SCHEMA_READY) {
+    r.memo = pt.memo ?? null;
+    r.repeat = pt.repeat ?? null;
+    r.repeat_until = pt.repeatUntil ?? null;
+  } else {
+    if (pt.memo != null) r.memo = pt.memo;
+    if (pt.repeat != null) r.repeat = pt.repeat;
+    if (pt.repeatUntil != null) r.repeat_until = pt.repeatUntil;
+  }
+  return r;
+};
 function diffArrById(ops, table, prevArr, curArr, pk, toRow) {
   const pm = new Map((prevArr || []).map(x => [x[pk], x]));
   const cm = new Map((curArr || []).map(x => [x[pk], x]));
@@ -202,7 +231,9 @@ function computeOps(prev, cur) {
     pm.forEach((_, name) => { if (!cm.has(name)) ops.push({ table: "managers", op: "delete", match: { name } }); });
   }
   diffMap(ops, "task_overrides", "task_id", prev.overrides, cur.overrides,
-    (k, v) => ({ task_id: k, date: v.date ?? null, done: v.done ?? null, memo: v.memo ?? null }),
+    // 완료체크/날짜이동은 반드시 저장돼야 하는 핵심 경로.
+    // 마이그레이션 전(SCHEMA_READY=false)에는 memo(신규 컬럼)를 절대 넣지 않아 date/done upsert 가 실패하지 않게 한다.
+    (k, v) => { const r = { task_id: k, date: v.date ?? null, done: v.done ?? null }; if (SCHEMA_READY) r.memo = v.memo ?? null; return r; },
     v => v && (v.date != null || v.done != null || v.memo != null));
   diffMap(ops, "step_overrides", "key", prev.managerSteps, cur.managerSteps,
     (k, v) => ({ key: k, mode: v.mode, arg: v.arg ?? null }));
@@ -219,7 +250,7 @@ function computeOps(prev, cur) {
 const DEFAULT_MANAGER_OPS = () => DEFAULT_MANAGERS.map((m, i) => ({ table: "managers", op: "upsert", row: { name: m.name, color: m.color, ord: i } }));
 
 // ---------- 메인 앱 ----------
-function App({ initialData, configured, emit, reload }) {
+function App({ initialData, configured, emit, reload, migrationNeeded }) {
   const [customers, setCustomers] = useState(initialData.customers);
   const [leaves, setLeaves] = useState(initialData.leaves);
   const [holidays, setHolidays] = useState(initialData.holidays);
@@ -928,7 +959,9 @@ function App({ initialData, configured, emit, reload }) {
   }, saving ? "저장 중…" : "저장됨"), /*#__PURE__*/React.createElement("a", {
     href: "/api/logout",
     className: "text-sm px-3 py-2 rounded-lg text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100"
-  }, "로그아웃"))),/*#__PURE__*/React.createElement("div", {
+  }, "로그아웃"))), migrationNeeded && /*#__PURE__*/React.createElement("div", {
+    className: "bg-amber-100 border-b border-amber-300 text-amber-900 text-sm px-8 py-2 flex items-center gap-2"
+  }, /*#__PURE__*/React.createElement("span", null, "⚠️"), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("b", null, "DB 업데이트 필요"), " — 일부 새 기능(비고·반복·수량·리포트 on/off·고객사 순서 등)이 저장되지 않고 있어요. 관리자가 Supabase에서 ", /*#__PURE__*/React.createElement("b", null, "migration-003.sql"), " 을 실행하면 해결됩니다. (완료체크·날짜이동 등 기존 기능은 정상 저장됩니다)")), /*#__PURE__*/React.createElement("div", {
     className: "flex"
   }, /*#__PURE__*/React.createElement("aside", {
     className: "w-64 shrink-0 border-r border-neutral-200 bg-white min-h-screen p-4"
@@ -2423,23 +2456,36 @@ const pickDoc = res => ({
   productQty: res.productQty || {}
 });
 // 행 단위 변경 전송
-function sendOps(ops, keepalive) {
+// 저장 성공 여부(HTTP 2xx)를 boolean 으로 반환 — 실패 시 호출부가 동기화 지점을 전진시키지 않음.
+// onSoft: 서버가 "스키마 미반영(마이그레이션 필요)"을 알리면 호출 → 상단 경고 배너 표시용.
+function sendOps(ops, keepalive, onSoft) {
   if (!ops || ops.length === 0) return Promise.resolve(true);
-  // 저장 성공 여부(HTTP 2xx)를 boolean 으로 반환 — 실패 시 호출부가 동기화 지점을 전진시키지 않음
   return fetch("/api/mutate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ops }),
     keepalive: !!keepalive
-  }).then(r => r.ok).catch(() => false);
+  }).then(async r => {
+    if (onSoft) {
+      try {
+        const j = await r.clone().json();
+        if (j && j.softErrors && j.softErrors.length) onSoft();
+      } catch (e) {}
+    }
+    return r.ok;
+  }).catch(() => false);
 }
 function MapoApp() {
   const [state, setState] = useState({ status: "loading", data: null, configured: false });
+  const [migrationNeeded, setMigrationNeeded] = useState(false);
   React.useEffect(() => {
     let alive = true;
     fetch("/api/data", { cache: "no-store" }).then(r => r.json()).then(res => {
       if (!alive) return;
       if (res && res.configured && !res.error) {
+        // 마이그레이션 반영 여부를 전역 플래그/배너에 반영 (신규 컬럼 전송 방식 결정)
+        setSchemaReady(res.migrationDone !== false);
+        if (res.migrationDone === false) setMigrationNeeded(true);
         const empty = !res.customers || res.customers.length === 0;
         const data = empty ? SEED_DOC : pickDoc(res);
         setState({ status: "ready", data, configured: true });
@@ -2462,7 +2508,7 @@ function MapoApp() {
     });
     return () => { alive = false; };
   }, []);
-  const emit = React.useCallback((ops, keepalive) => sendOps(ops, keepalive), []);
+  const emit = React.useCallback((ops, keepalive) => sendOps(ops, keepalive, () => { setSchemaReady(false); setMigrationNeeded(true); }), []);
   const reload = React.useCallback(async () => {
     try {
       const res = await fetch("/api/data", { cache: "no-store" }).then(r => r.json());
@@ -2479,7 +2525,8 @@ function MapoApp() {
     initialData: state.data,
     configured: state.configured,
     emit: emit,
-    reload: reload
+    reload: reload,
+    migrationNeeded: migrationNeeded
   });
 }
 
