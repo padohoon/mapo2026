@@ -355,8 +355,13 @@ function App({ initialData, configured, emit, reload, migrationNeeded }) {
       _synced.current = doc;
       _docRef.current = doc;
     };
+    let tick = 0;
     const iv = setInterval(async () => {
       if (typeof document !== "undefined" && document.hidden) return;
+      tick++;
+      // 유휴 백오프: 2분 이상 아무 편집도 없으면 4초 → 16초 주기로 늦춘다.
+      // (변경 확인 자체는 매우 가볍지만 서버리스 호출 수를 4배 줄여준다)
+      if (Date.now() - _lastEdit.current > 120000 && tick % 4 !== 0) return;
       if (Date.now() - _lastEdit.current < 3000) return; // 최근 편집 중이면 스킵
       // 미전송(또는 저장 실패로 남아있는) 로컬 변경이 있으면 서버본으로 덮지 말고 재전송한다
       const pending = computeOps(_synced.current, _docRef.current);
@@ -366,6 +371,12 @@ function App({ initialData, configured, emit, reload, migrationNeeded }) {
         if (ok) _synced.current = latest;
         return; // 이번 주기엔 서버본을 적용하지 않음 (내 변경 보호)
       }
+      // ── 전체 스냅샷을 받기 전에 "바뀐 게 있는지"부터 확인 ──
+      // 변경이 없으면 여기서 끝 → 전송량 약 0.6MB 대신 수십 바이트.
+      // v 가 null 이면(마이그레이션 004 전) 확인을 건너뛰고 기존처럼 전체 조회한다.
+      const v = await fetchVersion();
+      if (!alive) return;
+      if (v != null && LAST_V != null && v === LAST_V) return; // 아무도 안 바꿨음
       const doc = await reload();
       if (!alive || !doc) return;
       if (Date.now() - _lastEdit.current < 3000) return; // 재확인
@@ -2455,6 +2466,19 @@ const pickDoc = res => ({
   taskOrder: res.taskOrder || {},
   productQty: res.productQty || {}
 });
+// ── 전송량(egress) 절감: 변경 감지 ──
+// 서버는 쓰기가 일어날 때마다 "마지막 변경 시각"(v)을 갱신한다.
+// 폴링은 매번 0.6MB 짜리 전체 스냅샷을 받는 대신 /api/version(수십 바이트)으로 v 만 확인하고,
+// v 가 그대로면 아무것도 받지 않는다. (기존 구조는 탭 하나당 하루 12GB 를 써서 요금제 쿼터를 초과시켰다)
+// v 가 null 이면 마이그레이션 004 미반영 → 기존처럼 매번 전체 조회하는 동작으로 폴백한다.
+let LAST_V = null;
+function fetchVersion() {
+  return fetch("/api/version", { cache: "no-store" })
+    .then(r => (r.ok ? r.json() : null))
+    .then(j => (j && j.v != null ? j.v : null))
+    .catch(() => null);
+}
+
 // 행 단위 변경 전송
 // 저장 성공 여부(HTTP 2xx)를 boolean 으로 반환 — 실패 시 호출부가 동기화 지점을 전진시키지 않음.
 // onSoft: 서버가 "스키마 미반영(마이그레이션 필요)"을 알리면 호출 → 상단 경고 배너 표시용.
@@ -2466,12 +2490,12 @@ function sendOps(ops, keepalive, onSoft) {
     body: JSON.stringify({ ops }),
     keepalive: !!keepalive
   }).then(async r => {
-    if (onSoft) {
-      try {
-        const j = await r.clone().json();
-        if (j && j.softErrors && j.softErrors.length) onSoft();
-      } catch (e) {}
-    }
+    try {
+      const j = await r.clone().json();
+      // 내가 만든 변경의 v 를 기준점으로 당겨둔다 → 다음 폴링이 "남이 바꿨다"고 오해해 전체 재조회하지 않음
+      if (j && j.v != null) LAST_V = j.v;
+      if (onSoft && j && j.softErrors && j.softErrors.length) onSoft();
+    } catch (e) {}
     return r.ok;
   }).catch(() => false);
 }
@@ -2486,15 +2510,29 @@ function MapoApp() {
         // 마이그레이션 반영 여부를 전역 플래그/배너에 반영 (신규 컬럼 전송 방식 결정)
         setSchemaReady(res.migrationDone !== false);
         if (res.migrationDone === false) setMigrationNeeded(true);
-        const empty = !res.customers || res.customers.length === 0;
-        const data = empty ? SEED_DOC : pickDoc(res);
+        LAST_V = res.v != null ? res.v : null; // 폴링 기준점
+        // ── 시드 주입 조건 ──
+        // 예전에는 "고객사가 0건"이면 곧바로 시드를 PUT 했는데, 그 PUT 은 모든 테이블을
+        // delete 후 재삽입한다. 조회가 일시적으로 비어 돌아오는 상황(장애·쿼터 초과 직후 등)에서
+        // 실데이터가 통째로 시드로 덮여 사라질 수 있었다.
+        // → 정말 "완전히 빈 DB"(모든 핵심 슬라이스가 0건)일 때만 시드를 넣는다.
+        //   서버(PUT __seed)에도 같은 검사가 한 번 더 있어 이중으로 막는다.
+        const virgin =
+          (res.customers || []).length === 0 &&
+          (res.personalTasks || []).length === 0 &&
+          (res.managers || []).length === 0 &&
+          (res.holidays || []).length === 0 &&
+          (res.leaves || []).length === 0 &&
+          Object.keys(res.overrides || {}).length === 0 &&
+          Object.keys(res.managerSteps || {}).length === 0;
+        const data = virgin ? SEED_DOC : pickDoc(res);
         setState({ status: "ready", data, configured: true });
-        if (empty) {
-          // 최초 실행: 시드 데이터를 DB에 채워넣음
+        if (virgin) {
+          // 최초 실행: 시드 데이터를 DB에 채워넣음 (__seed → 서버가 기존 데이터 유무를 재확인)
           fetch("/api/data", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(SEED_DOC)
+            body: JSON.stringify({ ...SEED_DOC, __seed: true })
           }).catch(() => {});
         } else if (!res.managers || res.managers.length === 0) {
           // 기존 DB(마이그레이션 후)에 담당자 행이 없으면 기본 담당자를 1회 시드
@@ -2512,7 +2550,10 @@ function MapoApp() {
   const reload = React.useCallback(async () => {
     try {
       const res = await fetch("/api/data", { cache: "no-store" }).then(r => r.json());
-      if (res && res.configured && !res.error) return pickDoc(res);
+      if (res && res.configured && !res.error) {
+        if (res.v != null) LAST_V = res.v; // 이 스냅샷 시점을 기준점으로 갱신
+        return pickDoc(res);
+      }
     } catch (e) {}
     return null;
   }, []);

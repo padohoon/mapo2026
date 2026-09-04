@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase/server";
+import { readVersion, bumpVersion } from "@/lib/version";
 
 export const dynamic = "force-dynamic";
 export const fetchCache = "force-no-store";
@@ -133,9 +134,14 @@ export async function GET() {
     productQty[r.key] = r.qty;
   });
 
+  // 현재 "마지막 변경 시각" — 클라이언트는 이 값을 기준점으로 잡고,
+  // 이후 폴링에서는 /api/version(수십 바이트)만 확인해 바뀐 경우에만 여기로 다시 온다.
+  const v = await readVersion(sb);
+
   return NextResponse.json({
     configured: true,
     migrationDone,
+    v,
     customers,
     leaves,
     holidays,
@@ -156,6 +162,39 @@ export async function PUT(req: Request) {
   if (!sb) return NextResponse.json({ ok: false, configured: false });
 
   const doc = await req.json();
+
+  // ── 시드 덮어쓰기 방지 (무조건 적용) ──
+  // 이 PUT 은 모든 핵심 테이블을 delete 후 재삽입하는 "전체 교체"다.
+  // 앱에서 이 경로를 쓰는 곳은 "완전히 빈 DB 에 시드를 넣는" 최초 실행 단 한 곳뿐이므로,
+  // 기존 데이터가 남아있는데 여기까지 왔다면 그건 항상 사고다
+  // (조회가 일시적으로 비어 돌아오는 장애·쿼터 초과 직후 등 → 실데이터가 시드로 덮여 사라짐).
+  // → 요청 내용과 무관하게 서버가 직접 기존 데이터 존재 여부를 확인하고,
+  //   하나라도 남아있으면 아무것도 건드리지 않고 거부한다.
+  //   (플래그를 보내지 않는 구버전 클라이언트가 남아있어도 동일하게 막힌다)
+  {
+    const guard = ["customers", "personal_tasks", "task_overrides", "step_overrides", "managers"];
+    for (const t of guard) {
+      try {
+        const r = await sb.from(t).select("*", { count: "exact", head: true });
+        // 조회 실패 = "비었다"가 아니다. 확인이 안 되면 지우지 않는다.
+        if (r.error) {
+          return NextResponse.json(
+            { ok: false, error: `full-replace refused: cannot verify ${t} (${r.error.message})` },
+            { status: 409 }
+          );
+        }
+        if ((r.count || 0) > 0) {
+          return NextResponse.json(
+            { ok: false, error: `full-replace refused: ${t} has ${r.count} rows` },
+            { status: 409 }
+          );
+        }
+      } catch {
+        // 확인 자체가 실패하면 "비어있다"고 단정할 수 없다 → 안전하게 거부
+        return NextResponse.json({ ok: false, error: "full-replace refused: precheck failed" }, { status: 409 });
+      }
+    }
+  }
 
   // 신규 컬럼(003)은 기본값이 아닐 때만 포함 → 마이그레이션 전 스냅샷 저장도 실패하지 않음
   const customers = (doc.customers || []).map((x: any, i: number) => {
@@ -266,5 +305,6 @@ export async function PUT(req: Request) {
     }
   }
 
+  await bumpVersion(sb);
   return NextResponse.json({ ok: true });
 }

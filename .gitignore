@@ -29,3 +29,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# DB 백업 (고객사 데이터 포함 — 커밋 금지)
+/backups/

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase/server";
+import { bumpVersion } from "@/lib/version";
 
 export const dynamic = "force-dynamic";
 export const fetchCache = "force-no-store";
@@ -51,7 +52,12 @@ export async function POST(req: Request) {
       note(o.table, String(e?.message || e));
     }
   }
+  // 변경이 실제로 반영됐으면 "마지막 변경 시각"을 갱신 → 다른 탭의 폴링이 이걸 보고 전체 스냅샷을 받는다.
+  // (ops 가 있었는데 하드 오류가 없으면 무언가 바뀐 것으로 본다)
+  const v = ops.length && !errors.length ? await bumpVersion(sb) : null;
+
   // 하드 오류가 있을 때만 실패 처리. 스키마 미반영(소프트)만 있으면 ok:true 로 확정시켜 동기화가 멈추지 않게 한다.
   if (errors.length) return NextResponse.json({ ok: false, errors, softErrors }, { status: 500 });
-  return NextResponse.json({ ok: true, ...(softErrors.length ? { softErrors } : {}) });
+  // v 를 돌려주면 호출한 탭은 "내가 만든 변경"으로 스스로를 다시 불러오지 않아도 된다(불필요한 0.6MB 재조회 방지).
+  return NextResponse.json({ ok: true, ...(v != null ? { v } : {}), ...(softErrors.length ? { softErrors } : {}) });
 }
