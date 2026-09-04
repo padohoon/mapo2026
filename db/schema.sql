@@ -1,8 +1,9 @@
 -- ============================================================
 -- 마포 액션플랜 · Supabase(Postgres) 스키마
 -- Supabase 대시보드 → SQL Editor 에 붙여넣고 Run 하면 됩니다.
--- 서버(route handler)가 service_role 키로만 접근하므로 RLS 정책은 불필요합니다.
+-- 서버(route handler)가 service_role 키로만 접근하므로 RLS 정책(policy)은 불필요합니다.
 -- (service_role 은 RLS 를 우회하며, 브라우저에는 anon 키조차 노출하지 않습니다)
+-- 다만 정책이 없더라도 RLS 자체는 켜두는 편이 안전합니다 → db/migration-005.sql 참고.
 -- ============================================================
 
 -- 고객사 (원천 입력)
